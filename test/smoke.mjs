@@ -47,12 +47,14 @@ function serve(dir){
 }
 
 /* ---------- stubbed model replies ---------- */
-const STUB_EXTRACT = `[{"category":"ship","title":"All aboard — Dubrovnik","start":"2099-08-20T17:00","end":null,"location":"Gruž cruise port","address":"","confirmation":"","details":"Ship sails 17:30\\nLast tender 16:30","allAboard":true,"critical":true,"remindMinutes":90},
+/* Complete JSON objects, as a real model now returns them (the app no longer
+   prepends a prefill prefix). */
+const STUB_EXTRACT = `{"items":[{"category":"ship","title":"All aboard — Dubrovnik","start":"2099-08-20T17:00","end":null,"location":"Gruž cruise port","address":"","confirmation":"","details":"Ship sails 17:30\\nLast tender 16:30","allAboard":true,"critical":true,"remindMinutes":90},
 {"category":"activity","title":"Cable car up Srđ","start":null,"end":null,"location":"Dubrovnik","address":"","confirmation":"","details":"200 HRK return","allAboard":false,"critical":false,"remindMinutes":null}]}`;
-const STUB_TRIP = `{"name":"Adriatic cruise","destination":"Venice, Split, Dubrovnik","startDate":"2099-08-17","endDate":"2099-08-24","ship":"MSC Fantasia","notes":""},
+const STUB_TRIP = `{"trip":{"name":"Adriatic cruise","destination":"Venice, Split, Dubrovnik","startDate":"2099-08-17","endDate":"2099-08-24","ship":"MSC Fantasia","notes":""},
 "items":[{"category":"flight","title":"SK1234 OSL → VCE","start":"2099-08-17T07:20","end":"2099-08-17T09:55","location":"Oslo Gardermoen","address":"","confirmation":"Ref QW7T2P, seat 14A","details":"Terminal 2","allAboard":false,"critical":true,"remindMinutes":180}]}`;
 /* deliberately missing its closing brace — proves repairJSON() still recovers the payload */
-const STUB_RECS = `[{"title":"Srđ cable car","category":"activity","why":"Best view over the old town and quick enough for a port day.","location":"10 min walk from Ploče gate","duration":"1h15","bestTime":"before 10:30","cost":"~€27","tip":"Leaves 2h before all aboard. Verify it is running.","start":null,"fitsDeadline":true}]`;
+const STUB_RECS = `{"items":[{"title":"Srđ cable car","category":"activity","why":"Best view over the old town and quick enough for a port day.","location":"10 min walk from Ploče gate","duration":"1h15","bestTime":"before 10:30","cost":"~€27","tip":"Leaves 2h before all aboard. Verify it is running.","start":null,"fitsDeadline":true}]`;
 
 const TINY_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8EAgALgAD/aNpbtEAAAAASUVORK5CYII=',

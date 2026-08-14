@@ -397,8 +397,19 @@ async function claude(userContent, opts){
   opts = opts || {};
   if(!hasKey()) throw new Error('No API key set. Settings → Claude API key.');
   const base = (S.endpoint && S.endpoint.trim()) ? S.endpoint.trim().replace(/\/+$/,'') : 'https://api.anthropic.com';
-  const msgs = [{ role:'user', content: userContent }];
-  if(opts.prefill) msgs.push({ role:'assistant', content: opts.prefill });
+  // Steer the reply toward JSON with an instruction, NOT an assistant "prefill"
+  // turn. Some models reject a trailing assistant message ("does not support
+  // assistant message prefill — the conversation must end with a user message"),
+  // which broke every AI flow. parseLoose() tolerates stray prose/fences, so an
+  // instruction is just as reliable and works on every model.
+  let userMsg = userContent;
+  if(opts.prefill){
+    const instr = `\n\nRespond with ONLY a single JSON value and nothing else — no prose, no explanation, no code fences. Begin your reply with ${opts.prefill}`;
+    userMsg = Array.isArray(userContent)
+      ? userContent.concat([{ type:'text', text: instr }])
+      : String(userContent) + instr;
+  }
+  const msgs = [{ role:'user', content: userMsg }];
   let r;
   try {
     r = await fetch(base + '/v1/messages', {
@@ -430,7 +441,7 @@ async function claude(userContent, opts){
   const j = await r.json();
   const txt = (j.content||[]).filter(c => c.type === 'text').map(c => c.text).join('');
   if(j.stop_reason === 'max_tokens' && !opts.prefill) throw new Error('Response was cut short — try a smaller photo or less text.');
-  return (opts.prefill || '') + txt;
+  return txt;
 }
 /* close any brackets/strings the model left open, so a truncated or slightly
    malformed reply still yields everything it did manage to say */
