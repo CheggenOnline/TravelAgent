@@ -330,6 +330,7 @@ function normTrip(t){
   t.items.forEach(i => {
     if(i.leadMinutes === undefined) i.leadMinutes = null;
     if(i.requirements === undefined) i.requirements = null;
+    if(i.format === undefined) i.format = (i.category === 'note' ? 'note' : 'event');
   });
   t.lists.forEach(l => { if(!Array.isArray(l.entries)) l.entries = []; });
   seedTripDefaults(t);
@@ -541,7 +542,7 @@ function tripContext(){
 const EXTRACT_SYS = `You are the parsing engine inside a travel organiser app. You turn raw travel information (photos of tickets, screenshots, signs, emails, or typed notes) into structured itinerary items.
 
 Return ONLY a JSON object, no prose, shaped:
-{"kind":"program|document",
+{"kind":"program|document|list",
  "programDate":"YYYY-MM-DD" or null,
  "items":[{
  "category":"flight|ship|lodging|transport|activity|food|event|reminder|document|note",
@@ -556,7 +557,17 @@ Return ONLY a JSON object, no prose, shaped:
  "allAboard":true|false,
  "critical":true|false,
  "remindMinutes":integer or null
-}]}
+}],
+ "lists":[{"kind":"packing|checklist|shopping","title":"short title","entries":["one line per thing"]}]}
+
+Lists vs items:
+- When the source is a LIST of things to pack, buy, or remember — not a schedule — return it under "lists", NOT "items", and set top-level "kind":"list". Each line is one entry string; do not add times or turn the lines into itinerary items.
+- Pick the list "kind" from the heading and content, in any language:
+  · packing — "pakkeliste", "packing list", "to pack", "ta med", clothing/gear to bring.
+  · shopping — "handleliste", "shopping list", "kjøpe", "buy", groceries/things to purchase.
+  · checklist — "sjekkliste", "huskeliste", "checklist", "to-do", "huske", tasks to tick off.
+- A schedule and a list can appear together: put timed/booked things in "items" and the list lines in "lists".
+- "title": keep the source's own heading if it has one (e.g. "Pakkeliste"), else a short sensible one.
 
 Program vs document:
 - "kind":"program" when the source is a SCHEDULE with several entries — a cruise daily programme, a festival or conference agenda, a day's excursion list. These print many rows and the traveller usually wants only a few.
@@ -652,12 +663,14 @@ function dl(blob, filename){
    ============================================================ */
 let TAB = 'now';
 let ADDMODE = 'photo';
+let MANUAL_FORMAT = 'event';   // manual add: 'event' | 'list' | 'note'
 let FILTER = 'all';
 let SEARCH = '';
 let PENDING = [];      // staged photos {thumb, full}
 let CANDIDATES = [];   // parsed items awaiting confirmation
 let CAND_KIND = 'document';   // 'program' → pick-list mode, unselected by default
 let CAND_PDATE = '';          // one date asked once and applied to a dateless programme
+let PENDING_LISTS = [];       // detected packing/checklist/shopping lists awaiting confirmation
 
 function render(){
   const t = trip();
@@ -762,7 +775,7 @@ function vAdd(){
         <div style="font-weight:700;margin-top:6px">Snap or choose photos</div>
         <div class="tiny muted" style="margin-top:4px">Boarding pass, cruise daily programme, museum sign, restaurant card, a whiteboard — anything with details on it.</div>
       </label>
-      <input id="pick" type="file" accept="image/*" capture="environment" multiple class="hide">
+      <input id="pick" type="file" accept="image/*" multiple class="hide">
       <div class="thumbs" id="thumbs">${PENDING.map((p,ix)=>`<div class="th"><img src="${p.thumb}" alt=""><button class="x" data-act="rmphoto" data-ix="${ix}">✕</button></div>`).join('')}</div>
       ${PENDING.length?`<div class="btnrow"><button class="btn" data-act="read-photos" ${hasKey()?'':'disabled'}>✨ Read ${PENDING.length} photo${PENDING.length===1?'':'s'} &amp; file automatically</button></div>
         <button class="btn sec sm" style="width:100%;margin-top:9px" data-act="attach-manual">Skip reading — attach to a manual entry</button>`:''}
@@ -779,7 +792,32 @@ Cable car up Srđ, 200 HRK
 Dinner Konoba Ribar 20:00 booked under Heggen"></textarea>
       <div class="btnrow"><button class="btn" data-act="read-text" ${hasKey()?'':'disabled'}>✨ Sort into my trip</button></div>`;
   }
-  return seg + manualForm({});
+  // manual: choose a format — event (scheduled item), list, or note
+  const fseg = `<div class="seg" style="margin-bottom:14px">
+    <button class="${MANUAL_FORMAT==='event'?'on':''}" data-act="mformat" data-f="event">🎟️ Event</button>
+    <button class="${MANUAL_FORMAT==='list'?'on':''}" data-act="mformat" data-f="list">✅ List</button>
+    <button class="${MANUAL_FORMAT==='note'?'on':''}" data-act="mformat" data-f="note">📝 Note</button>
+  </div>`;
+  const body = MANUAL_FORMAT==='list' ? listForm() : MANUAL_FORMAT==='note' ? noteForm() : manualForm({});
+  return seg + fseg + body;
+}
+function listForm(){
+  return `<label class="fl">List type</label>
+    <select class="in" id="lf_kind">${Object.keys(LIST_KINDS).map(k=>`<option value="${k}">${LIST_KINDS[k].e} ${LIST_KINDS[k].l}</option>`).join('')}</select>
+    <label class="fl">Title</label>
+    <input class="in" id="lf_title" placeholder="e.g. Pakkeliste">
+    <label class="fl">Items — one per line</label>
+    <textarea class="in" id="lf_entries" style="min-height:160px" placeholder="Pass&#10;Lader&#10;Solkrem&#10;Badetøy"></textarea>
+    <div class="btnrow"><button class="btn" data-act="save-listform">Create list</button></div>
+    <div style="height:24px"></div>`;
+}
+function noteForm(){
+  return `<label class="fl">Title</label>
+    <input class="in" id="nf_title" placeholder="e.g. Where we parked the car">
+    <label class="fl">Note</label>
+    <textarea class="in" id="nf_text" style="min-height:160px" placeholder="Anything you want to remember"></textarea>
+    <div class="btnrow"><button class="btn" data-act="save-note">Save note</button></div>
+    <div style="height:24px"></div>`;
 }
 function manualForm(v, editId){
   const photo = v.photo || (PENDING[0] && PENDING[0].thumb) || '';
@@ -1590,6 +1628,7 @@ function addItems(list){
       confirmation: c.confirmation || '', details: c.details || '',
       photo: c.photo || '', remindMinutes: c.remindMinutes ? +c.remindMinutes : null,
       critical: !!c.critical, allAboard: !!c.allAboard, done: false,
+      format: c.format || (c.category === 'note' ? 'note' : 'event'),
       source: c.source || 'manual', createdAt: Date.now()
     });
     n++;
@@ -1648,8 +1687,9 @@ async function runExtract(content, source){
   const raw = await claude(content, { system: EXTRACT_SYS, prefill:'{', max_tokens:4000 });
   const out = parseLoose(raw);
   const list = (out.items||[]).map(x => Object.assign({}, x, { source }));
-  if(!list.length) throw new Error('Nothing travel-related found in that. Try a clearer photo, or add it manually.');
-  return { list, kind: out.kind === 'program' ? 'program' : 'document', programDate: out.programDate || '' };
+  const lists = (Array.isArray(out.lists) ? out.lists : []).filter(l => l && Array.isArray(l.entries) && l.entries.length);
+  if(!list.length && !lists.length) throw new Error('Nothing travel-related found in that. Try a clearer photo, or add it manually.');
+  return { list, lists, kind: out.kind === 'program' ? 'program' : 'document', programDate: out.programDate || '' };
 }
 function ctxBlock(){
   const ctx = tripContext();
@@ -1674,9 +1714,9 @@ async function doReadPhotos(btn){
     const r = await runExtract(content, 'photo');
     const photo = PENDING[0] ? PENDING[0].thumb : '';
     r.list.forEach((it, ix) => { if(photo && (r.kind==='program' || ix===0)) it.photo = photo; });  // keep the source photo on the items
-    CAND_KIND = r.kind; CAND_PDATE = r.programDate;
-    CANDIDATES = applyCandDefaults(r.list, r.kind, r.programDate);
-    PENDING = []; render(); reviewSheet();
+    PENDING = [];
+    if((r.lists||[]).length){ PENDING_LISTS = r.lists; CANDIDATES = r.list || []; render(); listReviewSheet(); }
+    else { CAND_KIND = r.kind; CAND_PDATE = r.programDate; CANDIDATES = applyCandDefaults(r.list, r.kind, r.programDate); render(); reviewSheet(); }
   } catch(e){ toast(e.message, true, 6500); btn.innerHTML = orig; btn.disabled = false; }
 }
 async function doReadText(btn){
@@ -1685,12 +1725,29 @@ async function doReadText(btn){
   const orig = btn.innerHTML;
   try {
     btn.innerHTML = `<span class="spin"></span> Sorting…`; btn.disabled = true;
-    const r = await runExtract(ctxBlock() + '\n\nExtract every itinerary item from this text:\n\n' + txt, 'text');
-    CAND_KIND = r.kind; CAND_PDATE = r.programDate;
-    CANDIDATES = applyCandDefaults(r.list, r.kind, r.programDate);
-    reviewSheet();
+    const r = await runExtract(ctxBlock() + '\n\nExtract every itinerary item from this text. If it is a packing/shopping/checklist, return it under "lists":\n\n' + txt, 'text');
+    if((r.lists||[]).length){ PENDING_LISTS = r.lists; CANDIDATES = r.list || []; listReviewSheet(); }
+    else { CAND_KIND = r.kind; CAND_PDATE = r.programDate; CANDIDATES = applyCandDefaults(r.list, r.kind, r.programDate); reviewSheet(); }
   } catch(e){ toast(e.message, true, 6500); }
   btn.innerHTML = orig; btn.disabled = false;
+}
+function listReviewCard(l, ix){
+  return `<div class="card" data-plist="${ix}">
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <select class="in" data-lf="kind" style="flex:0 0 44%;padding:8px 10px">${Object.keys(LIST_KINDS).map(k=>`<option value="${k}"${l.kind===k?' selected':''}>${LIST_KINDS[k].e} ${LIST_KINDS[k].l}</option>`).join('')}</select>
+      <input class="in" data-lf="title" value="${esc(l.title||'')}" placeholder="List title" style="flex:1">
+    </div>
+    <label class="fl" style="margin-top:2px">Items — one per line</label>
+    <textarea class="in" data-lf="entries" style="min-height:130px">${esc((l.entries||[]).join('\n'))}</textarea>
+  </div>`;
+}
+function listReviewSheet(){
+  const body = `<p class="tiny muted" style="margin:8px 2px 12px">This looks like a list. Check the type and items, then create it.</p>`
+    + PENDING_LISTS.map(listReviewCard).join('')
+    + (CANDIDATES.length ? `<p class="tiny muted center">＋ ${CANDIDATES.length} scheduled item${CANDIDATES.length===1?'':'s'} will also be added to the timeline.</p>` : '')
+    + `<div class="btnrow"><button class="btn" data-primary data-act="commit-lists">Create ${PENDING_LISTS.length} list${PENDING_LISTS.length===1?'':'s'}</button></div>
+    <button class="btn sec sm" style="width:100%;margin-top:9px" data-act="close-sheet">Discard</button>`;
+  sheet(PENDING_LISTS.length>1?'Found lists':'Found a list', body);
 }
 async function doSuggestCat(btn){
   const v = readManual();
@@ -1804,6 +1861,23 @@ document.addEventListener('click', async (ev) => {
   if(a === 'close-sheet'){ closeSheet(); return; }
   if(a === 'tab'){ TAB = el.dataset.tab; SEARCH=''; render(); window.scrollTo(0,0); return; }
   if(a === 'addmode'){ ADDMODE = el.dataset.m; render(); return; }
+  if(a === 'mformat'){ MANUAL_FORMAT = el.dataset.f; render(); return; }
+  if(a === 'save-listform'){
+    const t = trip(); if(!t){ toast('Create a trip first', true); return; }
+    const kind = ($('#lf_kind')||{}).value || 'checklist';
+    const title = (($('#lf_title')||{}).value || '').trim() || (LIST_KINDS[kind] ? LIST_KINDS[kind].l : 'List');
+    const rows = (($('#lf_entries')||{}).value || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const l = { id:uid(), kind, title:title.slice(0,80), due:'', leadMinutes:null, forActivityId:'', archived:false, createdAt:Date.now(),
+      entries: rows.map(txt => ({ id:uid(), text:txt.slice(0,140), done:false, qty:null, bagId:'', personId:'', where:kind==='shopping'?'home':'', price:null, currency:'', requiredFor:[], source:'manual', reason:'', note:'' })) };
+    t.lists.push(l); CURRENT_LIST = l.id; save(); TAB = 'list'; render(); toast('List created'); return;
+  }
+  if(a === 'save-note'){
+    const title = (($('#nf_title')||{}).value || '').trim();
+    const text = (($('#nf_text')||{}).value || '').trim();
+    if(!title && !text){ toast('Write something first', true); return; }
+    addItems([{ category:'note', title: title || text.slice(0,60), details: text, format:'note', source:'manual' }]);
+    TAB = 'timeline'; render(); toast('Note saved'); return;
+  }
   if(a === 'filter'){ FILTER = el.dataset.c; render(); return; }
   if(a === 'open'){ openItem(id); return; }
 
@@ -1832,6 +1906,28 @@ document.addEventListener('click', async (ev) => {
     const n = addItems(chosen); CANDIDATES = []; CAND_KIND = 'document'; CAND_PDATE = ''; closeSheet();
     toast(n+' item'+(n===1?'':'s')+' filed'+(lastSkipped?` · ${lastSkipped} already there`:''), false, 3600);
     TAB = 'timeline'; render(); return;
+  }
+  if(a === 'commit-lists'){
+    const t = trip(); if(!t){ toast('Create a trip first', true); closeSheet(); return; }
+    $$('[data-plist]').forEach(el => {
+      const ix = +el.dataset.plist; if(!PENDING_LISTS[ix]) return;
+      $$('[data-lf]', el).forEach(f => {
+        if(f.dataset.lf === 'entries') PENDING_LISTS[ix].entries = f.value.split('\n').map(s => s.trim()).filter(Boolean);
+        else PENDING_LISTS[ix][f.dataset.lf] = f.value;
+      });
+    });
+    let made = 0, firstId = null;
+    PENDING_LISTS.forEach(pl => {
+      const kind = LIST_KINDS[pl.kind] ? pl.kind : 'checklist';
+      const l = { id:uid(), kind, title:(pl.title||LIST_KINDS[kind].l).slice(0,80), due:'', leadMinutes:null, forActivityId:'', archived:false, createdAt:Date.now(),
+        entries:(pl.entries||[]).map(txt => ({ id:uid(), text:String(txt).slice(0,140), done:false, qty:null, bagId:'', personId:'', where:kind==='shopping'?'home':'', price:null, currency:'', requiredFor:[], source:'text', reason:'', note:'' })) };
+      t.lists.push(l); made++; if(!firstId) firstId = l.id;
+    });
+    const nItems = CANDIDATES.length ? addItems(CANDIDATES) : 0;
+    PENDING_LISTS = []; CANDIDATES = []; closeSheet();
+    if(made === 1 && !nItems){ CURRENT_LIST = firstId; TAB = 'list'; } else TAB = 'lists';
+    render(); toast(made+' list'+(made===1?'':'s')+' created'+(nItems?` · ${nItems} item${nItems===1?'':'s'}`:''));
+    return;
   }
 
   if(a === 'save-manual'){
