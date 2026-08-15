@@ -58,6 +58,8 @@ const STUB_RECS = `{"items":[{"title":"Srđ cable car","category":"activity","wh
 /* REQUIREMENTS: shell (essential, daypack), headlamp (daypack), boots (essential, daypack) */
 const STUB_REQS = `{"pack":[{"text":"Waterproof shell jacket","qty":1,"essential":true,"daypack":true},{"text":"Headlamp","qty":1,"essential":false,"daypack":true},{"text":"Hiking boots","qty":1,"essential":true,"daypack":true}],"hazards":["Weather changes fast above 1000 m"],"notes":"Tell someone your route."}`;
 const STUB_LISTSUGGEST = `{"items":[{"text":"Blister plasters","reason":"You have a 6-hour hike on day 4","essential":false}]}`;
+/* a dateless daily programme — kind:program, three rows with times only */
+const STUB_PROGRAM = `{"kind":"program","programDate":null,"items":[{"category":"activity","title":"Cable car up Srđ","start":null,"timeOnly":"09:30","location":"Ploče gate","confirmation":"","details":"","allAboard":false,"critical":false,"remindMinutes":null},{"category":"activity","title":"Ship trivia","start":null,"timeOnly":"16:00","location":"Lounge","confirmation":"","details":"","allAboard":false,"critical":false,"remindMinutes":null},{"category":"food","title":"Captain's dinner","start":null,"timeOnly":"20:00","location":"Main dining","confirmation":"","details":"","allAboard":false,"critical":false,"remindMinutes":null}]}`;
 
 const TINY_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8EAgALgAD/aNpbtEAAAAASUVORK5CYII=',
@@ -88,11 +90,14 @@ pg.on('pageerror', e => consoleErrs.push('pageerror: ' + e.message));
 pg.on('console', m => { if (m.type() === 'error' && !/ERR_INTERNET_DISCONNECTED/.test(m.text())) consoleErrs.push('console: ' + m.text()); });
 
 await ctx.route('**/v1/messages', async route => {
-  const sys = (JSON.parse(route.request().postData() || '{}').system) || '';
+  const post = JSON.parse(route.request().postData() || '{}');
+  const sys = post.system || '';
+  const userText = JSON.stringify(post.messages || '');
   const text = sys.includes('requirements engine') ? STUB_REQS
              : sys.includes('help a traveller pack') ? STUB_LISTSUGGEST
              : sys.includes('local guide') ? STUB_RECS
              : sys.includes('ADDITIONAL TASK') ? STUB_TRIP
+             : /DAILY PROGRAMME/i.test(userText) ? STUB_PROGRAM
              : STUB_EXTRACT;
   await route.fulfill({ status: 200, contentType: 'application/json',
     headers: { 'access-control-allow-origin': '*' },
@@ -305,6 +310,62 @@ try {
     post.kinds.length > 0 && post.kinds.every(k => k === 'buy-there'), post.kinds.join(','));
   check('an essential gap after departure raises an at-risk alert', post.atRisk);
   await shot('05-phase2');
+
+  /* --- v2 Phase 3: programme pick-list, date-once --- */
+  await tap('nav [data-tab="add"]');
+  await tap('[data-act="addmode"][data-m="text"]');
+  await pg.fill('#blob', 'DAILY PROGRAMME — Tuesday\n09:30 Cable car up Srd\n16:00 Ship trivia\n20:00 Captains dinner');
+  await tap('[data-act="read-text"]');
+  await pg.waitForTimeout(800);
+  check('a programme becomes a pick-list', await pg.locator('[data-cand]').count() === 3);
+  check('programme rows are unselected by default', await pg.evaluate(() => CANDIDATES.every(c => !c.sel)));
+  check('a dateless programme asks for the date once', await pg.locator('#prog_date').count() === 1);
+  await pg.fill('#prog_date', '2099-08-20');
+  await tap('[data-act="apply-progdate"]');
+  await pg.waitForTimeout(200);
+  check('applying the date fills every row', await pg.evaluate(() => CANDIDATES.every(c => (c.start||'').startsWith('2099-08-20'))));
+  const beforeItems = await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v2')).trips[0].items.length);
+  await pg.locator('[data-act="cand-sel"][data-ix="0"]').first().click(); await pg.waitForTimeout(120);
+  await pg.locator('[data-act="cand-sel"][data-ix="1"]').first().click(); await pg.waitForTimeout(120);
+  await tap('[data-act="commit-cands"]');
+  await pg.waitForTimeout(500);
+  const afterItems = await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v2')).trips[0].items.length);
+  check('only the picked programme rows are added', afterItems - beforeItems === 2, `${beforeItems} → ${afterItems}`);
+
+  /* --- v2 Phase 3: airline rule --- */
+  check('flags a power bank in a checked bag', await pg.evaluate(() => {
+    const t = S.trips.find(x => x.id === S.activeTrip);
+    const checked = t.bags.find(b => b.kind === 'checked').id;
+    const pl = t.lists.find(x => x.kind === 'packing' && !x.forActivityId);
+    pl.entries.push({ id:'pb1', text:'Power bank', done:false, qty:null, bagId:checked, personId:'', where:'', price:null, currency:'', requiredFor:[], source:'manual', reason:'', note:'' });
+    save();
+    return computeAlerts(t, new Date()).some(a => /checked bag/i.test(a.text));
+  }));
+
+  /* --- v2 Phase 3: base-list learning --- */
+  await pg.evaluate(() => {
+    const t = S.trips.find(x => x.id === S.activeTrip);
+    const pl = t.lists.find(x => x.kind === 'packing' && !x.forActivityId);
+    pl.entries.forEach(e => { if(/boots/i.test(e.text)) e.done = true; });   // ticked boots, power bank left un-ticked
+    CURRENT_LIST = pl.id; TAB = 'list'; render();
+  });
+  await pg.waitForTimeout(200);
+  await pg.locator('[data-act="learn-list"]').first().click();
+  await pg.waitForTimeout(200);
+  const base = await pg.evaluate(() => S.baseList.map(t => t.toLowerCase()));
+  check('base-list learning keeps ticked items', base.some(x => /boots/.test(x)), base.join(','));
+  check('base-list learning drops never-ticked items', !base.some(x => /power bank/.test(x)));
+  await pg.evaluate(() => { TAB = 'lists'; render(); });
+  await tap('[data-act="new-list"]');
+  await pg.selectOption('#l_kind', 'packing');
+  await pg.fill('#l_title', 'New trip bag');
+  await pg.check('#l_base');
+  await tap('[data-act="save-list"]');
+  await pg.waitForTimeout(300);
+  check('a new packing list can start from the usual list', await pg.evaluate(() => {
+    const t = S.trips.find(x => x.id === S.activeTrip); const l = t.lists.find(x => x.title === 'New trip bag');
+    return !!(l && l.entries.some(e => /boots/i.test(e.text)));
+  }));
 
   /* --- calendar export --- */
   await tap('nav [data-tab="timeline"]');

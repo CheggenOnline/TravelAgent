@@ -17,16 +17,20 @@ signal.
 > `portside.v1`, see rule #6) so existing installs keep their data. Do not "finish the
 > rename" on those — see the non-negotiables.
 
-> **v2 (in progress).** The app is being extended per `PORTSIDEV2SPEC.md`. **Phases 1–2 are
-> shipped:** a computed, ranked **dashboard**; hand-built **lists** (checklist / packing /
-> shopping); a searchable **refs vault**; and the intelligence layer — a **REQUIREMENTS** call
-> fired once when an activity is added (result stored on the item), a purely-local
-> **requirement diff** against the packing list, the **departure boundary** (before → "add to
-> packing"; after → "buy/rent/borrow there" + an at-risk alert for essential gaps),
-> **daypack** lists that reference what is actually packed, and **suggestions** with
-> accept/dismiss where dismissals are sticky and global (`S.neverSuggest`). LIST_SUGGEST runs
-> on demand ("check my list"). Storage is `portside.v2` (non-destructive migration from v1).
-> **Phase 3 remaining:** program pick-list capture, airline-rule checks, base-list learning.
+> **v2 (complete).** The app has been extended per `PORTSIDEV2SPEC.md`, all three phases:
+> - **Phase 1** — a computed, ranked **dashboard**; hand-built **lists** (checklist / packing
+>   / shopping); a searchable **refs vault**; non-destructive migration to `portside.v2`.
+> - **Phase 2** — a **REQUIREMENTS** call fired once when an activity is added (stored on the
+>   item), a purely-local **requirement diff** against the packing list, the **departure
+>   boundary** (before → "add to packing"; after → "buy/rent/borrow there" + an at-risk alert
+>   for essential gaps), **daypack** lists that reference what is actually packed, and
+>   **suggestions** with sticky, global dismissals (`S.neverSuggest`). LIST_SUGGEST on demand.
+> - **Phase 3** — **programme capture** as a pick-list (unselected by default, ask-the-date
+>   once, multi-photo = one programme), an **airline-rule** check (power bank in a checked
+>   bag), and **base-list learning** (a reusable "usual" packing list that keeps what you tick
+>   and drops what you never use).
+>
+> Deferred until asked (per the spec): money/expenses, group sharing, disruption cascade.
 
 ---
 

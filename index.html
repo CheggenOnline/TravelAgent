@@ -304,7 +304,7 @@ const store = (() => {
 /* ---------- state ---------- */
 let S = {
   v:2, apiKey:'', model:'claude-opus-5', endpoint:'', theme:'auto',
-  activeTrip:null, trips:[], notified:[], recs:{}, neverSuggest:[]
+  activeTrip:null, trips:[], notified:[], recs:{}, neverSuggest:[], baseList:[]
 };
 /* Seed the one Person + three Bags every trip needs, so nothing has to be
    configured before the app is usable. Non-destructive: only fills gaps. */
@@ -346,6 +346,7 @@ function load(){
   if(!Array.isArray(S.trips)) S.trips = [];
   if(!Array.isArray(S.notified)) S.notified = [];
   if(!Array.isArray(S.neverSuggest)) S.neverSuggest = [];
+  if(!Array.isArray(S.baseList)) S.baseList = [];
   if(!S.recs || typeof S.recs !== 'object') S.recs = {};
   S.trips.forEach(normTrip);
   if(!S.trips.some(t => t.id === S.activeTrip)) S.activeTrip = S.trips[0] ? S.trips[0].id : null;
@@ -540,11 +541,14 @@ function tripContext(){
 const EXTRACT_SYS = `You are the parsing engine inside a travel organiser app. You turn raw travel information (photos of tickets, screenshots, signs, emails, or typed notes) into structured itinerary items.
 
 Return ONLY a JSON object, no prose, shaped:
-{"items":[{
+{"kind":"program|document",
+ "programDate":"YYYY-MM-DD" or null,
+ "items":[{
  "category":"flight|ship|lodging|transport|activity|food|event|reminder|document|note",
  "title":"short, scannable, most useful identifier first",
  "start":"YYYY-MM-DDTHH:MM" or null,
  "end":"YYYY-MM-DDTHH:MM" or null,
+ "timeOnly":"HH:MM" or null,
  "location":"place or terminal/port name" or "",
  "address":"" ,
  "confirmation":"booking ref / seat / gate / cabin" or "",
@@ -553,6 +557,11 @@ Return ONLY a JSON object, no prose, shaped:
  "critical":true|false,
  "remindMinutes":integer or null
 }]}
+
+Program vs document:
+- "kind":"program" when the source is a SCHEDULE with several entries — a cruise daily programme, a festival or conference agenda, a day's excursion list. These print many rows and the traveller usually wants only a few.
+- "kind":"document" when it is a single thing — one boarding pass, one booking, one ticket, one sign.
+- "programDate": if a programme shows a weekday ("Tuesday") but no calendar date, set programDate null AND leave each item's "start" null; put the row's clock time in "timeOnly" instead. The app asks the date once and applies it. If the real date IS visible, fill "start" normally and leave "timeOnly" null.
 
 Rules:
 - One item per discrete thing that happens. Split multi-leg journeys into separate items. A hotel stay is ONE item (start = check-in, end = check-out).
@@ -647,6 +656,8 @@ let FILTER = 'all';
 let SEARCH = '';
 let PENDING = [];      // staged photos {thumb, full}
 let CANDIDATES = [];   // parsed items awaiting confirmation
+let CAND_KIND = 'document';   // 'program' → pick-list mode, unselected by default
+let CAND_PDATE = '';          // one date asked once and applied to a dateless programme
 
 function render(){
   const t = trip();
@@ -804,16 +815,22 @@ function manualForm(v, editId){
 
 /* ---------- candidate review ---------- */
 function reviewSheet(){
-  const body = `
-    <p class="tiny muted" style="margin:8px 2px 12px">Check what Claude found, fix anything it misread, then save. Times are treated as local time where you are.</p>
-    <div id="cands">${CANDIDATES.map(candCard).join('')}</div>
-    <div class="btnrow"><button class="btn" data-primary data-act="commit-cands">Add ${CANDIDATES.length} item${CANDIDATES.length===1?'':'s'} to trip</button></div>
+  const isProg = CAND_KIND === 'program';
+  const selN = CANDIDATES.filter(c => c.sel).length;
+  const n = isProg ? selN : CANDIDATES.length;
+  const needDate = isProg && !CAND_PDATE && CANDIDATES.some(c => !c.start);
+  let head = `<p class="tiny muted" style="margin:8px 2px 12px">${isProg?'This looks like a programme. Tick the few you actually want — nothing is selected by default.':'Check what Claude found, fix anything it misread, then save.'} Times are treated as local time where you are.</p>`;
+  if(needDate) head += `<div class="card flat" style="padding:11px 13px"><label class="fl" style="margin-top:0">What date is this programme?</label><input class="in" id="prog_date" type="date" value="${esc(CAND_PDATE)}"><button class="btn sec sm" style="width:100%;margin-top:9px" data-act="apply-progdate">Apply the date to every row</button></div>`;
+  if(isProg) head += `<div class="btnrow" style="margin-top:0"><button class="btn sec sm" style="flex:1" data-act="cand-all">Select all</button><button class="btn sec sm" style="flex:1" data-act="cand-none">Select none</button></div>`;
+  const body = head + `<div id="cands">${CANDIDATES.map(candCard).join('')}</div>
+    <div class="btnrow"><button class="btn" data-primary data-act="commit-cands">Add ${n} item${n===1?'':'s'} to trip</button></div>
     <button class="btn sec sm" style="width:100%;margin-top:9px" data-act="close-sheet">Discard</button>`;
-  sheet('Found '+CANDIDATES.length+' item'+(CANDIDATES.length===1?'':'s'), body);
+  sheet(isProg?('Programme — '+CANDIDATES.length+' rows'):('Found '+CANDIDATES.length+' item'+(CANDIDATES.length===1?'':'s')), body);
 }
 function candCard(c, ix){
-  return `<div class="card" data-cand="${ix}">
+  return `<div class="card" data-cand="${ix}" style="${c.sel?'':'opacity:.72'}">
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <button class="check ${c.sel?'on':''}" style="width:auto;padding:0;flex:0 0 auto" data-act="cand-sel" data-ix="${ix}" aria-label="Select"><span class="box">${c.sel?'✓':''}</span></button>
       <select class="in" data-f="category" style="flex:1;padding:8px 10px">${CATKEYS.map(k=>`<option value="${k}"${c.category===k?' selected':''}>${CATS[k].e} ${CATS[k].l}</option>`).join('')}</select>
       <button class="btn dgr sm" data-act="rmcand" data-ix="${ix}" aria-label="Remove" style="flex:0 0 40px;padding:9px 0">✕</button>
     </div>
@@ -826,7 +843,7 @@ function candCard(c, ix){
       ${c.allAboard?'<span class="badge b">ALL ABOARD</span>':''}
       ${c.critical?'<span class="badge w">critical</span>':''}
       ${c.remindMinutes?`<span class="badge g">remind ${c.remindMinutes>=60?(c.remindMinutes/60)+'h':c.remindMinutes+'m'} before</span>`:''}
-      ${!c.start?'<span class="badge">no date found</span>':''}
+      ${!c.start && c.timeOnly?`<span class="badge">${esc(c.timeOnly)} · needs a date</span>`:(!c.start?'<span class="badge">no date found</span>':'')}
     </div>
   </div>`;
 }
@@ -1029,6 +1046,13 @@ function computeAlerts(t, now){
   if(!preDeparture(t, now)){
     computeGaps(t).filter(g => g.essential).forEach(g => A.push({ crit:true, text:'“'+g.activityTitle+'” at risk — no '+g.text+' (essential). Buy, rent or borrow it there.' }));
   }
+  // airline rule: power banks / spare lithium batteries must fly in the cabin, not checked
+  (t.lists||[]).filter(l => l.kind==='packing' && !l.archived).forEach(l => (l.entries||[]).forEach(e => {
+    if(!e.bagId) return;
+    const bag = (t.bags||[]).find(b => b.id === e.bagId);
+    if(bag && bag.kind==='checked' && /power ?bank|battery|batteries|lithium/i.test(e.text))
+      A.push({ crit:true, text:'“'+e.text+'” is in a checked bag — airlines require power banks and spare batteries in your cabin bag.' });
+  }));
   return A;
 }
 
@@ -1238,6 +1262,9 @@ function vList(){
   }
   if(l.kind==='packing' && !l.forActivityId && hasKey())
     h += '<button class="btn sec" style="width:100%;margin-top:4px" data-act="check-list" data-id="'+l.id+'">✨ Check my list against the plan</button>';
+  if(l.kind==='packing' && !l.forActivityId)
+    h += '<button class="btn sec" style="width:100%;margin-top:8px" data-act="learn-list" data-id="'+l.id+'">⭐ Save as my usual packing list</button>'
+      + '<p class="xtiny muted" style="margin:6px 2px 0">Learns from this trip: keeps what you ticked, drops what you never used. Offer it on your next trip with one tap.</p>';
   h += '<div class="btnrow"><button class="btn sec sm" style="flex:1" data-act="edit-list" data-id="'+l.id+'">Edit list</button>'
     + '<button class="btn sec sm" style="flex:1" data-act="archive-list" data-id="'+l.id+'">Archive</button>'
     + '<button class="btn dgr sm" data-act="del-list" data-id="'+l.id+'">Delete</button></div><div style="height:24px"></div>';
@@ -1289,6 +1316,7 @@ function listSheet(l){
     + '<label class="fl">Due (optional)</label><input class="in" id="l_due" type="datetime-local" value="'+esc(e.due||'')+'">'
     + '<label class="fl">Start reminding — hours before due (optional)</label><input class="in" id="l_lead" type="number" min="0" placeholder="auto" value="'+(e.leadMinutes!=null?(e.leadMinutes/60):'')+'">'
     + '<p class="xtiny muted" style="margin-top:5px">Blank uses sensible defaults: checklist 1 day, packing 3 days, shopping the whole trip.</p>'
+    + ((!l && (S.baseList||[]).length) ? '<label class="tiny" style="display:flex;gap:7px;align-items:center;margin-top:10px"><input type="checkbox" id="l_base"> Start a packing list from my usual list ('+S.baseList.length+' items)</label>' : '')
     + '<div class="btnrow"><button class="btn" data-primary data-act="save-list" data-id="'+esc(e.id||'')+'">'+(l?'Save':'Create list')+'</button></div><div style="height:10px"></div>');
 }
 function entrySheet(l, e){
@@ -1617,27 +1645,38 @@ function readManual(){
 
 /* ---- AI flows ---- */
 async function runExtract(content, source){
-  const ctx = tripContext();
-  const raw = await claude(content, { system: EXTRACT_SYS, prefill:'{"items":', max_tokens:4000 });
+  const raw = await claude(content, { system: EXTRACT_SYS, prefill:'{', max_tokens:4000 });
   const out = parseLoose(raw);
   const list = (out.items||[]).map(x => Object.assign({}, x, { source }));
   if(!list.length) throw new Error('Nothing travel-related found in that. Try a clearer photo, or add it manually.');
-  return list;
+  return { list, kind: out.kind === 'program' ? 'program' : 'document', programDate: out.programDate || '' };
 }
 function ctxBlock(){
   const ctx = tripContext();
   return 'TRIP CONTEXT (for resolving dates and places):\n' + JSON.stringify(ctx);
 }
 
+/* Programmes come back as a selectable list, nothing selected by default;
+   single documents keep the old behaviour (everything selected). */
+function applyCandDefaults(list, kind, pdate){
+  return list.map(c => {
+    if(kind==='program' && !c.start && c.timeOnly && pdate) c.start = pdate+'T'+c.timeOnly;
+    c.sel = (kind !== 'program');
+    return c;
+  });
+}
 async function doReadPhotos(btn){
   const orig = btn.innerHTML;
   try {
-    const content = [{ type:'text', text: ctxBlock() + '\n\nExtract every itinerary item you can see in the following image(s).' }];
+    const content = [{ type:'text', text: ctxBlock() + '\n\nExtract every itinerary item you can see in the following image(s). If the images are a printed schedule/programme, set kind "program".' }];
     PENDING.forEach(p => content.push({ type:'image', source:{ type:'base64', media_type:'image/jpeg', data: p.full.split(',')[1] } }));
     btn.innerHTML = `<span class="spin"></span> Reading…`; btn.disabled = true;
-    const list = await runExtract(content, 'photo');
-    if(PENDING[0]) list[0].photo = PENDING[0].thumb;
-    CANDIDATES = list; PENDING = []; render(); reviewSheet();
+    const r = await runExtract(content, 'photo');
+    const photo = PENDING[0] ? PENDING[0].thumb : '';
+    r.list.forEach((it, ix) => { if(photo && (r.kind==='program' || ix===0)) it.photo = photo; });  // keep the source photo on the items
+    CAND_KIND = r.kind; CAND_PDATE = r.programDate;
+    CANDIDATES = applyCandDefaults(r.list, r.kind, r.programDate);
+    PENDING = []; render(); reviewSheet();
   } catch(e){ toast(e.message, true, 6500); btn.innerHTML = orig; btn.disabled = false; }
 }
 async function doReadText(btn){
@@ -1646,7 +1685,9 @@ async function doReadText(btn){
   const orig = btn.innerHTML;
   try {
     btn.innerHTML = `<span class="spin"></span> Sorting…`; btn.disabled = true;
-    CANDIDATES = await runExtract(ctxBlock() + '\n\nExtract every itinerary item from this text:\n\n' + txt, 'text');
+    const r = await runExtract(ctxBlock() + '\n\nExtract every itinerary item from this text:\n\n' + txt, 'text');
+    CAND_KIND = r.kind; CAND_PDATE = r.programDate;
+    CANDIDATES = applyCandDefaults(r.list, r.kind, r.programDate);
     reviewSheet();
   } catch(e){ toast(e.message, true, 6500); }
   btn.innerHTML = orig; btn.disabled = false;
@@ -1773,9 +1814,22 @@ document.addEventListener('click', async (ev) => {
   if(a === 'attach-manual'){ ADDMODE = 'manual'; render(); return; }
 
   if(a === 'rmcand'){ syncCands(); CANDIDATES.splice(+el.dataset.ix,1); if(!CANDIDATES.length){ closeSheet(); return; } reviewSheet(); return; }
+  if(a === 'cand-sel'){ syncCands(); const c = CANDIDATES[+el.dataset.ix]; if(c) c.sel = !c.sel; reviewSheet(); return; }
+  if(a === 'cand-all'){ syncCands(); CANDIDATES.forEach(c => c.sel = true); reviewSheet(); return; }
+  if(a === 'cand-none'){ syncCands(); CANDIDATES.forEach(c => c.sel = false); reviewSheet(); return; }
+  if(a === 'apply-progdate'){
+    syncCands();
+    const d = ($('#prog_date')||{}).value || '';
+    if(!d){ toast('Pick a date first', true); return; }
+    CAND_PDATE = d;
+    CANDIDATES.forEach(c => { if(!c.start && c.timeOnly) c.start = d+'T'+c.timeOnly; });
+    reviewSheet(); return;
+  }
   if(a === 'commit-cands'){
     syncCands();
-    const n = addItems(CANDIDATES); CANDIDATES = []; closeSheet();
+    const chosen = CANDIDATES.filter(c => c.sel);
+    if(!chosen.length){ toast('Nothing selected', true); return; }
+    const n = addItems(chosen); CANDIDATES = []; CAND_KIND = 'document'; CAND_PDATE = ''; closeSheet();
     toast(n+' item'+(n===1?'':'s')+' filed'+(lastSkipped?` · ${lastSkipped} already there`:''), false, 3600);
     TAB = 'timeline'; render(); return;
   }
@@ -1858,6 +1912,8 @@ document.addEventListener('click', async (ev) => {
       const kindEl = $('#l_kind');
       const l = { id:uid(), kind:(kindEl?kindEl.value:'checklist'), title, due:g('l_due'), leadMinutes:leadMin,
                   forActivityId:'', archived:false, createdAt:Date.now(), entries:[] };
+      if(l.kind==='packing' && $('#l_base') && $('#l_base').checked)
+        l.entries = (S.baseList||[]).map(txt => ({ id:uid(), text:txt, done:false, qty:null, bagId:'', personId:'', where:'', price:null, currency:'', requiredFor:[], source:'derived', reason:'from your usual list', note:'' }));
       t.lists.push(l); CURRENT_LIST = l.id;
     }
     save(); closeSheet(); TAB = id ? TAB : 'list'; render(); toast(id?'List updated':'List created'); return;
@@ -1948,6 +2004,16 @@ document.addEventListener('click', async (ev) => {
     return;
   }
   if(a === 'check-list'){ await doCheckList(el, id); return; }
+  if(a === 'learn-list'){
+    const l = findList(id); if(!l || l.kind !== 'packing') return;
+    const neverTicked = new Set((l.entries||[]).filter(e => !e.done).map(e => normText(e.text)));
+    const seen = new Set(), out = [];
+    const add = txt => { const k = normText(txt); if(k && !seen.has(k)){ seen.add(k); out.push(txt); } };
+    (S.baseList||[]).forEach(txt => { if(!neverTicked.has(normText(txt))) add(txt); });   // keep base unless never used this trip
+    (l.entries||[]).filter(e => e.done).forEach(e => add(e.text.replace(/ — .*$/,'')));    // add what you ticked (strip daypack annotation)
+    S.baseList = out;
+    save(); render(); toast('Your usual list now has '+out.length+' item'+(out.length===1?'':'s')); return;
+  }
 
   if(a === 'theme'){ S.theme = el.dataset.v; save(); applyTheme(); render(); return; }
   if(a === 'save-settings'){
@@ -1972,7 +2038,7 @@ document.addEventListener('click', async (ev) => {
   }
   if(a === 'wipe'){
     if(!confirm('Delete all trips, items and settings from this device?')) return;
-    store.del(KEY); S = { v:2, apiKey:'', model:'claude-opus-5', endpoint:'', theme:'auto', activeTrip:null, trips:[], notified:[], recs:{}, neverSuggest:[] };
+    store.del(KEY); S = { v:2, apiKey:'', model:'claude-opus-5', endpoint:'', theme:'auto', activeTrip:null, trips:[], notified:[], recs:{}, neverSuggest:[], baseList:[] };
     save(); TAB = 'now'; render(); toast('All data deleted'); return;
   }
 });
@@ -1995,7 +2061,7 @@ document.addEventListener('change', async (ev) => {
       const txt = await f.text(); const p = JSON.parse(txt);
       if(!p || !Array.isArray(p.trips)) throw new Error('That file is not a Travel Agent backup');
       if(!confirm('Replace everything on this device with the backup?')) return;
-      S = Object.assign({ v:2, apiKey:'', model:'claude-opus-5', endpoint:'', theme:'auto', activeTrip:null, trips:[], notified:[], recs:{}, neverSuggest:[] }, p);
+      S = Object.assign({ v:2, apiKey:'', model:'claude-opus-5', endpoint:'', theme:'auto', activeTrip:null, trips:[], notified:[], recs:{}, neverSuggest:[], baseList:[] }, p);
       load(); save(); applyTheme(); TAB = 'now'; render(); toast('Backup restored');
     } catch(e){ toast(e.message, true, 5000); }
   }
