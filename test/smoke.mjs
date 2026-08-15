@@ -121,7 +121,7 @@ try {
   await tap('[data-act="save-trip"]');
   await pg.waitForTimeout(400);
   check('flight item came across with the trip',
-    (await pg.locator('.item').count()) >= 1);
+    (await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v2')).trips[0].items.length)) >= 1);
   await shot('01-now');
 
   /* --- paste-to-sort --- */
@@ -143,7 +143,7 @@ try {
   check('all-aboard becomes the countdown hero', /BACK ON BOARD/i.test(heroLabel), heroLabel);
 
   /* --- duplicate guard --- */
-  const before = await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v1')).trips[0].items.length);
+  const before = await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v2')).trips[0].items.length);
   await tap('nav [data-tab="add"]');
   await tap('[data-act="addmode"][data-m="text"]');
   await pg.fill('#blob', 'All aboard Dubrovnik 17:00. Cable car up Srd 200 HRK.');
@@ -151,7 +151,7 @@ try {
   await pg.waitForTimeout(800);
   await tap('[data-act="commit-cands"]');
   await pg.waitForTimeout(500);
-  const after = await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v1')).trips[0].items.length);
+  const after = await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v2')).trips[0].items.length);
   check('re-adding the same items is deduplicated', after === before, `${before} → ${after}`);
 
   /* --- photo path --- */
@@ -175,7 +175,7 @@ try {
   await tap('[data-act="save-manual"]');
   await pg.waitForTimeout(400);
   check('manual entry saves',
-    await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v1'))
+    await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v2'))
       .trips[0].items.some(i => i.title === 'Meet guide at Pile gate')));
 
   /* --- recommendations (stub is malformed JSON on purpose) --- */
@@ -189,11 +189,54 @@ try {
   await pg.waitForTimeout(300);
 
   /* --- persistence --- */
-  const expect = await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v1')).trips[0].items.length);
+  const expect = await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v2')).trips[0].items.length);
   await pg.reload({ waitUntil: 'load' });
   await pg.waitForTimeout(600);
-  const got = await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v1')).trips[0].items.length);
+  const got = await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v2')).trips[0].items.length);
   check('data survives a reload', got === expect, `${expect} → ${got}`);
+
+  /* --- v2: lists + tick-in-place on the dashboard --- */
+  await tap('nav [data-tab="now"]');
+  const noRefsCardYet = await pg.evaluate(() => !Array.from(document.querySelectorAll('.card')).some(c => /Quick refs/.test(c.textContent)));
+  check('a card with nothing to say does not render (no Quick refs yet)', noRefsCardYet);
+
+  await tap('[data-tab="lists"]');
+  await tap('[data-act="new-list"]');
+  await pg.fill('#l_title', 'Before we leave');
+  const soonDue = await pg.evaluate(() => { const d = new Date(Date.now() + 2*3600*1000); const p = n => String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; });
+  await pg.fill('#l_due', soonDue);
+  await tap('[data-act="save-list"]');
+  await pg.fill('#ent_new', 'Order euros');
+  await tap('[data-act="add-entry"]');
+  await pg.fill('#ent_new', 'Pause the post');
+  await tap('[data-act="add-entry"]');
+  check('checklist entries persist',
+    await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v2')).trips[0].lists[0].entries.length === 2));
+
+  await tap('nav [data-tab="now"]');
+  check('checklist surfaces on the dashboard inside its lead window',
+    await pg.evaluate(() => Array.from(document.querySelectorAll('.card')).some(c => /Before we leave/.test(c.textContent))));
+  await shot('04-dashboard');
+  await pg.locator('[data-act="tick-entry"]').first().click();
+  await pg.waitForTimeout(250);
+  check('an entry ticks from the dashboard without navigating',
+    await pg.evaluate(() => JSON.parse(localStorage.getItem('portside.v2')).trips[0].lists[0].entries.filter(e => e.done).length === 1));
+
+  await pg.evaluate(() => { const s = JSON.parse(localStorage.getItem('portside.v2')); s.trips[0].lists[0].entries.forEach(e => e.done = true); localStorage.setItem('portside.v2', JSON.stringify(s)); });
+  await pg.reload({ waitUntil: 'load' });
+  await pg.waitForTimeout(500);
+  check('a completed checklist drops off the dashboard',
+    await pg.evaluate(() => !Array.from(document.querySelectorAll('.card')).some(c => /Before we leave/.test(c.textContent))));
+
+  /* --- v2: refs vault --- */
+  await tap('[data-tab="refs"]');
+  await tap('[data-act="new-ref"]');
+  await pg.fill('#r_label', 'Passport no.');
+  await pg.fill('#r_value', '123456789');
+  await tap('[data-act="save-ref"]');
+  await pg.waitForTimeout(200);
+  check('a ref saves and shows in the vault',
+    await pg.evaluate(() => /123456789/.test(document.querySelector('#view').textContent)));
 
   /* --- calendar export --- */
   await tap('nav [data-tab="timeline"]');
@@ -214,12 +257,46 @@ try {
     await pg.reload({ waitUntil: 'load' });
     await pg.waitForTimeout(700);
     check('reloads while offline', await pg.locator('nav .tab').count() === 5);
+    await tap('[data-tab="refs"]');
+    await pg.waitForTimeout(200);
+    check('the refs vault opens and shows values with the network disabled',
+      await pg.evaluate(() => /123456789/.test(document.querySelector('#view').textContent)));
     const cold = await ctx.newPage();
     await cold.goto(BASE, { waitUntil: 'load' }).catch(() => {});
     await cold.waitForTimeout(500);
     check('cold start works offline (the installed-app case)',
       await cold.locator('nav .tab').count() === 5);
     await ctx.setOffline(false);
+  }
+
+  /* --- v2: non-destructive migration from portside.v1 --- */
+  {
+    const mctx = await browser.newContext();
+    const mp = await mctx.newPage();
+    await mp.addInitScript(() => {
+      localStorage.setItem('portside.v1', JSON.stringify({
+        v: 1, activeTrip: 't1',
+        trips: [{ id: 't1', name: 'Old Trip', items: [
+          { id: 'i1', category: 'flight', title: 'Legacy flight', start: '2099-01-01T10:00', critical: true, done: false, source: 'manual', createdAt: 1 }
+        ] }]
+      }));
+    });
+    await mp.goto(BASE, { waitUntil: 'load' });
+    await mp.waitForTimeout(500);
+    const mig = await mp.evaluate(() => {
+      const v2 = JSON.parse(localStorage.getItem('portside.v2') || 'null');
+      const t = v2 && v2.trips && v2.trips[0];
+      return {
+        hasV2: !!v2, v1kept: !!localStorage.getItem('portside.v1'),
+        name: t && t.name, items: t && t.items.length,
+        arrays: !!(t && Array.isArray(t.lists) && Array.isArray(t.bags) && Array.isArray(t.refs)),
+        seededBags: t && t.bags.length
+      };
+    });
+    check('v1 data migrates into v2 with nothing lost',
+      mig.hasV2 && mig.name === 'Old Trip' && mig.items === 1 && mig.arrays && mig.seededBags === 3, JSON.stringify(mig));
+    check('portside.v1 is kept as a fallback after migration', mig.v1kept);
+    await mctx.close();
   }
 
   check('no unexpected console errors', consoleErrs.length === 0, consoleErrs.join(' | '));

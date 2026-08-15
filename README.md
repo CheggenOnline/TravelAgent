@@ -12,10 +12,18 @@ deliberate design constraint, not an accident: the app has to work on a cruise s
 signal.
 
 > **Naming note.** The app was previously called *Portside*; it has been renamed to
-> **Travel Agent**. Every user-facing reference now says "Travel Agent". Two internal
-> identifiers were deliberately **left unchanged** to avoid breaking existing installs and
-> saved data: the `localStorage` key `portside.v1` (see rule #6) and any older cache
-> namespaces. Do not "finish the rename" on those — see the non-negotiables.
+> **Travel Agent**. Every user-facing reference now says "Travel Agent". The internal
+> `localStorage` keys deliberately keep the `portside` name (`portside.v2`, migrated from
+> `portside.v1`, see rule #6) so existing installs keep their data. Do not "finish the
+> rename" on those — see the non-negotiables.
+
+> **v2 (in progress).** The app is being extended per `PORTSIDEV2SPEC.md`: a computed,
+> ranked **dashboard** (replaces the old Now tab), hand-built **lists** (checklist / packing
+> / shopping) reachable from the trip-summary card, and a searchable **refs vault**. Storage
+> moved to `portside.v2` with a non-destructive migration. Phase 1 (this) adds all of that
+> with **no new AI calls**; Phases 2–3 add the requirement engine, suggestions and program
+> pick-list capture. Each `item`/`trip` gained optional fields with safe defaults, so v1 data
+> keeps working.
 
 ---
 
@@ -110,11 +118,12 @@ These are the ways this app actually breaks. Treat them as hard rules.
    browser's `localStorage`. It is never in the source. If a key ever appears in a commit or a
    log, treat it as compromised and tell Christian to revoke it at console.anthropic.com.
 
-6. **Do not rename the storage key.** All trip data lives under `localStorage['portside.v1']`.
-   It still carries the old `portside` name on purpose — renaming it, or changing the shape of
-   the stored object without a migration, silently wipes his trips. If a schema change is
-   genuinely needed, write a migration in `load()` that reads the old shape and converts it,
-   and bump the key to `portside.v2`.
+6. **Do not rename the storage key, and never migrate destructively.** Trip data lives under
+   `localStorage['portside.v2']`. It still carries the old `portside` name on purpose. `load()`
+   migrates from `portside.v1` when v2 is absent and **leaves v1 in place as a fallback** — do
+   not delete v1. Any future schema change must add fields with safe defaults (as v2 did) or
+   ship a real migration in `load()` and bump to `portside.v3`. Renaming or reshaping without a
+   migration silently wipes his trips.
 
 ---
 
