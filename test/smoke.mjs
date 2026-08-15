@@ -60,6 +60,8 @@ const STUB_REQS = `{"pack":[{"text":"Waterproof shell jacket","qty":1,"essential
 const STUB_LISTSUGGEST = `{"items":[{"text":"Blister plasters","reason":"You have a 6-hour hike on day 4","essential":false}]}`;
 /* a dateless daily programme — kind:program, three rows with times only */
 const STUB_PROGRAM = `{"kind":"program","programDate":null,"items":[{"category":"activity","title":"Cable car up Srđ","start":null,"timeOnly":"09:30","location":"Ploče gate","confirmation":"","details":"","allAboard":false,"critical":false,"remindMinutes":null},{"category":"activity","title":"Ship trivia","start":null,"timeOnly":"16:00","location":"Lounge","confirmation":"","details":"","allAboard":false,"critical":false,"remindMinutes":null},{"category":"food","title":"Captain's dinner","start":null,"timeOnly":"20:00","location":"Main dining","confirmation":"","details":"","allAboard":false,"critical":false,"remindMinutes":null}]}`;
+/* a packing list ("pakkeliste") — returned under "lists", not items */
+const STUB_PACKLIST = `{"kind":"list","programDate":null,"items":[],"lists":[{"kind":"packing","title":"Pakkeliste","entries":["Pass","Lader","Solkrem","Badetøy"]}]}`;
 
 const TINY_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8EAgALgAD/aNpbtEAAAAASUVORK5CYII=',
@@ -98,6 +100,7 @@ await ctx.route('**/v1/messages', async route => {
              : sys.includes('local guide') ? STUB_RECS
              : sys.includes('ADDITIONAL TASK') ? STUB_TRIP
              : /DAILY PROGRAMME/i.test(userText) ? STUB_PROGRAM
+             : /PAKKELISTE/i.test(userText) ? STUB_PACKLIST
              : STUB_EXTRACT;
   await route.fulfill({ status: 200, contentType: 'application/json',
     headers: { 'access-control-allow-origin': '*' },
@@ -365,6 +368,50 @@ try {
   check('a new packing list can start from the usual list', await pg.evaluate(() => {
     const t = S.trips.find(x => x.id === S.activeTrip); const l = t.lists.find(x => x.title === 'New trip bag');
     return !!(l && l.entries.some(e => /boots/i.test(e.text)));
+  }));
+
+  /* --- v2.1: paste a «pakkeliste» → a real packing list --- */
+  await tap('nav [data-tab="add"]');
+  await tap('[data-act="addmode"][data-m="text"]');
+  await pg.fill('#blob', 'PAKKELISTE\nPass\nLader\nSolkrem\nBadetøy');
+  await tap('[data-act="read-text"]');
+  await pg.waitForTimeout(800);
+  check('a pasted packing list opens the list review', await pg.locator('[data-plist]').count() === 1);
+  await tap('[data-act="commit-lists"]');
+  await pg.waitForTimeout(400);
+  check('a pasted «pakkeliste» becomes a packing list, not itinerary items', await pg.evaluate(() => {
+    const t = S.trips.find(x => x.id === S.activeTrip);
+    const l = t.lists.find(x => x.kind === 'packing' && /pakkeliste/i.test(x.title));
+    return !!(l && l.entries.length === 4);
+  }));
+
+  /* --- v2.1: image input allows the library (no forced camera) --- */
+  await tap('nav [data-tab="add"]');
+  await tap('[data-act="addmode"][data-m="photo"]');
+  check('the photo input is not locked to the camera', (await pg.getAttribute('#pick', 'capture')) === null);
+
+  /* --- v2.1: manual format selector (event / list / note) --- */
+  await tap('[data-act="addmode"][data-m="manual"]');
+  await tap('[data-act="mformat"][data-f="list"]');
+  await pg.selectOption('#lf_kind', 'shopping');
+  await pg.fill('#lf_title', 'Handleliste');
+  await pg.fill('#lf_entries', 'Melk\nBrød\nKaffe');
+  await tap('[data-act="save-listform"]');
+  await pg.waitForTimeout(300);
+  check('manual List format creates a list from lines', await pg.evaluate(() => {
+    const t = S.trips.find(x => x.id === S.activeTrip); const l = t.lists.find(x => x.title === 'Handleliste');
+    return !!(l && l.kind === 'shopping' && l.entries.length === 3);
+  }));
+  await tap('nav [data-tab="add"]');
+  await tap('[data-act="addmode"][data-m="manual"]');
+  await tap('[data-act="mformat"][data-f="note"]');
+  await pg.fill('#nf_title', 'Where we parked');
+  await pg.fill('#nf_text', 'Level 3, near lift B');
+  await tap('[data-act="save-note"]');
+  await pg.waitForTimeout(300);
+  check('manual Note format creates a note item', await pg.evaluate(() => {
+    const t = S.trips.find(x => x.id === S.activeTrip);
+    return t.items.some(i => i.title === 'Where we parked' && i.format === 'note' && i.category === 'note');
   }));
 
   /* --- calendar export --- */

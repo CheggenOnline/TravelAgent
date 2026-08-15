@@ -30,6 +30,12 @@ signal.
 >   bag), and **base-list learning** (a reusable "usual" packing list that keeps what you tick
 >   and drops what you never use).
 >
+> **Follow-ups on top of v2:** pasted/photographed content that is a packing/shopping/checklist
+> (e.g. a Norwegian "pakkeliste") is detected by EXTRACT and creates a real **list** via a list
+> review, not itinerary items; the **Add ＋** flow has a **format** selector (event / list /
+> note) alongside category, and items carry a `format` field; the photo input allows choosing
+> from the **library** (camera no longer forced).
+>
 > Deferred until asked (per the spec): money/expenses, group sharing, disruption cascade.
 
 ---

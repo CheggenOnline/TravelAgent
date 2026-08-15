@@ -1,5 +1,5 @@
 /* Travel Agent offline cache. Bump CACHE to force a refresh for installed users. */
-const CACHE = 'travelagent-v5';
+const CACHE = 'travelagent-v6';
 const ASSETS = ['./', './index.html', './manifest.webmanifest'];
 
 self.addEventListener('install', e => {
