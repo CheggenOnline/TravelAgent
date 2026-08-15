@@ -219,6 +219,19 @@ textarea.in{min-height:96px;resize:vertical;line-height:1.5}
 .okbox{border:1px solid color-mix(in srgb,var(--acc) 45%,transparent);background:color-mix(in srgb,var(--acc) 10%,transparent);border-radius:var(--r2);padding:11px 13px;font-size:13px;margin-bottom:12px}
 .progressline{height:3px;background:var(--line);border-radius:9px;overflow:hidden;margin-top:10px}
 .progressline i{display:block;height:100%;background:var(--acc);transition:width .3s}
+
+/* ---------- v2: checks, lists, refs ---------- */
+.check{display:flex;align-items:center;gap:11px;width:100%;text-align:left;padding:9px 4px;color:var(--tx)}
+.check .box{flex:0 0 22px;height:22px;border-radius:7px;border:1.7px solid var(--line2);display:grid;place-items:center;font-size:13px;font-weight:700;color:#04211d;background:transparent}
+.check.on .box{background:var(--acc);border-color:var(--acc)}
+.check .tx{font-size:14px;line-height:1.32;overflow-wrap:anywhere}
+.check .strike{text-decoration:line-through;opacity:.5}
+.lrow{display:flex;gap:11px;align-items:center;width:100%;text-align:left;padding:11px;border:1px solid var(--line);border-radius:var(--r2);background:var(--panel);margin-bottom:8px}
+.lrow:active{background:var(--panel2)}
+.lrow .ic{flex:0 0 34px;height:34px;border-radius:9px;display:grid;place-items:center;font-size:17px;background:var(--panel2)}
+.lrow .bd{flex:1;min-width:0}
+.refv{overflow-wrap:anywhere;cursor:pointer}
+.dotwarn{border:1px solid color-mix(in srgb,var(--bad) 45%,transparent);background:color-mix(in srgb,var(--bad) 12%,transparent);border-radius:var(--r2);padding:11px 13px;font-size:12.5px;margin-bottom:12px}
 </style>
 </head>
 <body>
@@ -273,7 +286,8 @@ const MODELS = [
   ['claude-sonnet-5','Sonnet 5 — balanced'],
   ['claude-haiku-4-5','Haiku 4.5 — fastest / cheapest']
 ];
-const KEY = 'portside.v1';   // internal localStorage key — kept stable on purpose; renaming it wipes saved trips (see README rule #6)
+const KEY   = 'portside.v2';   // v2 storage. Migrated from V1KEY once, non-destructively.
+const V1KEY = 'portside.v1';   // previous schema — kept as a fallback, never deleted (see README rule #6)
 
 /* ---------- storage that never throws ---------- */
 const store = (() => {
@@ -289,19 +303,54 @@ const store = (() => {
 
 /* ---------- state ---------- */
 let S = {
-  v:1, apiKey:'', model:'claude-opus-5', endpoint:'', theme:'auto',
-  activeTrip:null, trips:[], notified:[], recs:{}
+  v:2, apiKey:'', model:'claude-opus-5', endpoint:'', theme:'auto',
+  activeTrip:null, trips:[], notified:[], recs:{}, neverSuggest:[]
 };
+/* Seed the one Person + three Bags every trip needs, so nothing has to be
+   configured before the app is usable. Non-destructive: only fills gaps. */
+function seedTripDefaults(t){
+  if(!Array.isArray(t.people) || !t.people.length) t.people = [{ id:uid(), name:'Me', isMe:true, notes:'' }];
+  const pid = t.people[0].id;
+  if(!Array.isArray(t.bags) || !t.bags.length) t.bags = [
+    { id:uid(), name:'Checked bag', kind:'checked', personId:pid, weightKg:null },
+    { id:uid(), name:'Cabin bag',   kind:'cabin',   personId:pid, weightKg:null },
+    { id:uid(), name:'Daypack',     kind:'daypack', personId:pid, weightKg:null }
+  ];
+}
+/* Earliest critical flight/ship start = when you leave home. Drives the
+   pre/post-departure boundary (principle 2). Empty string when unknown. */
+function deriveDeparture(t){
+  const c = (t.items||[]).filter(i => i.critical && (i.category==='flight'||i.category==='ship') && i.start)
+                         .map(i => i.start).sort();
+  return c[0] || '';
+}
+function normTrip(t){
+  if(!Array.isArray(t.items)) t.items = [];
+  ['people','bags','lists','refs','suggestions'].forEach(k => { if(!Array.isArray(t[k])) t[k] = []; });
+  t.items.forEach(i => {
+    if(i.leadMinutes === undefined) i.leadMinutes = null;
+    if(i.requirements === undefined) i.requirements = null;
+  });
+  t.lists.forEach(l => { if(!Array.isArray(l.entries)) l.entries = []; });
+  seedTripDefaults(t);
+  if(!t.departureAt) t.departureAt = deriveDeparture(t);
+  return t;
+}
 function load(){
+  let raw = store.get(KEY), fromV1 = false;
+  if(!raw){ const v1 = store.get(V1KEY); if(v1){ raw = v1; fromV1 = true; } }   // migrate, non-destructively
   try {
-    const raw = store.get(KEY);
     if(raw){ const p = JSON.parse(raw); if(p && typeof p === 'object') S = Object.assign(S, p); }
   } catch(e){ console.warn('load failed', e); }
+  S.v = 2;
   if(!Array.isArray(S.trips)) S.trips = [];
   if(!Array.isArray(S.notified)) S.notified = [];
+  if(!Array.isArray(S.neverSuggest)) S.neverSuggest = [];
   if(!S.recs || typeof S.recs !== 'object') S.recs = {};
-  S.trips.forEach(t => { if(!Array.isArray(t.items)) t.items = []; });
+  S.trips.forEach(normTrip);
   if(!S.trips.some(t => t.id === S.activeTrip)) S.activeTrip = S.trips[0] ? S.trips[0].id : null;
+  // Persist v2 on first run or after a migration, leaving portside.v1 untouched as a fallback.
+  if(fromV1 || !store.get(KEY)) save();
 }
 let saveWarned = false;
 function save(){
@@ -607,7 +656,7 @@ function render(){
   $$('.tab').forEach(b => b.classList.toggle('on', b.dataset.tab === TAB));
   const v = $('#view');
   if(!t && TAB !== 'settings' && TAB !== 'trips'){ v.innerHTML = welcome(); return; }
-  v.innerHTML = ({ now:vNow, timeline:vTimeline, add:vAdd, ideas:vIdeas, trips:vTrips, settings:vSettings }[TAB] || vNow)();
+  v.innerHTML = ({ now:vNow, timeline:vTimeline, add:vAdd, ideas:vIdeas, trips:vTrips, settings:vSettings, lists:vLists, list:vList, refs:vRefs }[TAB] || vNow)();
   v.className = 'view';
   if(TAB === 'add' && ADDMODE === 'manual') setTimeout(()=>{ const f = $('#m_title'); if(f) f.focus(); }, 60);
 }
@@ -632,50 +681,9 @@ function nextAllAboard(){
                 .sort(sortItems)[0] || null;
 }
 function vNow(){
-  const t = trip(), all = items().slice().sort(sortItems), now = new Date();
-  const aa = nextAllAboard();
-  let hero;
-  if(aa){
-    const ms = toDate(aa.start) - now;
-    const cls = ms < 45*60000 ? 'bad' : ms < 120*60000 ? 'warn' : '';
-    hero = `<div class="hero ${cls}" id="hero" data-target="${esc(aa.start)}" data-kind="aboard">
-      <div class="lbl"><span class="pulse"></span> Back on board</div>
-      <div class="big" id="cd-big">${esc(dur(ms))}</div>
-      <div class="sub" id="cd-sub">${esc(aa.title)} · ${esc(fmtT(aa.start))} ${esc(fmtDay(aa.start))}${aa.location?' · '+esc(aa.location):''}</div>
-    </div>`;
-  } else {
-    const nx = all.find(i => !i.done && toDate(i.start) && toDate(i.start) > now);
-    hero = nx
-      ? `<div class="hero" id="hero" data-target="${esc(nx.start)}" data-kind="next">
-          <div class="lbl"><span class="pulse"></span> Next up</div>
-          <div class="big" id="cd-big" style="font-size:30px">${esc(dur(toDate(nx.start)-now))}</div>
-          <div class="sub" id="cd-sub">${CATS[nx.category]?CATS[nx.category].e:''} ${esc(nx.title)} · ${esc(fmtT(nx.start))} ${esc(fmtDay(nx.start))}</div>
-         </div>`
-      : `<div class="hero"><div class="lbl">Nothing scheduled</div>
-          <div class="sub" style="margin-top:6px">Add a flight, ship time or reminder and it will show up here.</div></div>`;
-  }
-
-  const today = all.filter(i => dayKey(i.start) === todayStr());
-  const soon  = all.filter(i => { const d = toDate(i.start); return d && d > now && dayKey(i.start) !== todayStr(); }).slice(0,4);
-  const undated = all.filter(i => !i.start);
-  const missed = all.filter(i => { const d = toDate(i.start); return d && d < now && !i.done && i.critical; });
-
-  let h = hero;
-  if(t.destination || t.startDate){
-    h += `<div class="card flat" style="display:flex;align-items:center;gap:10px;padding:11px 13px">
-      <div style="font-size:20px">🧭</div><div style="flex:1;min-width:0">
-      <div style="font-weight:650;font-size:14px">${esc(t.name)}</div>
-      <div class="xtiny muted">${esc([t.destination, t.startDate?fmtDay(t.startDate)+(t.endDate?' – '+fmtDay(t.endDate):''):''].filter(Boolean).join(' · '))}</div>
-      </div><div class="badge">${all.length} item${all.length===1?'':'s'}</div></div>`;
-  }
-  if(missed.length) h += `<div class="warnbox"><b>⚠︎ Passed without being ticked off</b><div style="margin-top:6px">${missed.slice(0,3).map(i=>esc(i.title)+' · '+esc(fmtT(i.start))).join('<br>')}</div></div>`;
-
-  h += sec('Today', today.length ? today.map(row).join('') : `<div class="card flat tiny muted center" style="padding:18px">Nothing on the plan for today.</div>`);
-  if(soon.length)    h += sec('Coming up', soon.map(row).join(''));
-  if(undated.length) h += sec('No date yet', undated.slice(0,6).map(row).join(''));
-  h += `<div class="btnrow" style="margin:16px 0 26px"><button class="btn sec sm" style="flex:1" data-act="tab" data-tab="add">＋ Add something</button>
-        <button class="btn sec sm" style="flex:1" data-act="tab" data-tab="ideas">✨ Ideas</button></div>`;
-  return h;
+  const t = trip(); if(!t) return welcome();
+  const cards = buildCards().filter(c => c && c.score > 0).sort((a,b) => b.score - a.score);
+  return cards.map(c => c.html).join('') + '<div style="height:26px"></div>';
 }
 function sec(title, body){ return `<div class="sec-h"><h3>${esc(title)}</h3><div class="ln"></div></div>${body}`; }
 
@@ -963,6 +971,350 @@ function vSettings(){
 }
 
 /* ============================================================
+   v2 model — lists, refs, dashboard   (all local, offline)
+   ============================================================ */
+let CURRENT_LIST = null;          // id of the list open in the detail view
+let REFQ = '';                    // vault search text
+const REVEALED = new Set();       // ref ids unmasked this session
+
+const LIST_KINDS = {
+  checklist:{ l:'Checklist', e:'✅', lead:1440 },   // surface 1 day out
+  packing:  { l:'Packing',   e:'🧳', lead:4320 },   // surface 3 days out
+  shopping: { l:'Shopping',  e:'🛒', lead:null }    // surface whole trip
+};
+const REF_CATS = {
+  identity:['Identity','🪪'], booking:['Booking','🎫'], money:['Money','💳'],
+  medical:['Medical','⚕️'], connectivity:['Connectivity','📶'],
+  emergency:['Emergency','🆘'], other:['Other','📌']
+};
+
+function lists(){ const t = trip(); return t ? t.lists : []; }
+function refs(){ const t = trip(); return t ? t.refs : []; }
+function bagsOf(){ const t = trip(); return t ? t.bags : []; }
+function findList(lid){ return lists().find(l => l.id === lid) || null; }
+function bagName(bid){ const b = bagsOf().find(x => x.id === bid); return b ? b.name : ''; }
+function progress(l){ const e = l.entries||[]; return { done:e.filter(x=>x.done).length, total:e.length }; }
+function listComplete(l){ const p = progress(l); return p.total>0 && p.done===p.total; }
+function leadOf(l){ return l.leadMinutes==null ? (LIST_KINDS[l.kind]?LIST_KINDS[l.kind].lead:1440) : l.leadMinutes; }
+function listSurfaces(l, now){
+  if(l.archived) return false;
+  if(l.kind==='shopping') return true;                 // whole trip
+  const d = toDate(l.due); if(!d) return true;         // no deadline → always available
+  const lead = leadOf(l); if(lead==null) return true;
+  return now >= new Date(d.getTime() - lead*60000);
+}
+function isUnderway(t, now){
+  const start = toDate(t.departureAt) || toDate(t.startDate), end = toDate(t.endDate);
+  if(start && now < start) return false;
+  if(end && now > new Date(end.getTime()+86400000)) return false;
+  return !!(start || end);
+}
+
+/* alerts feeding the Needs-attention card. All computed, all offline. */
+function computeAlerts(t, now){
+  const A = [];
+  t.items.forEach(i => {
+    if(i.critical && !i.done && i.start){ const d = toDate(i.start); if(d && d < now) A.push({ crit:true, text:'“'+i.title+'” passed without being ticked off' }); }
+  });
+  const tripEnd = toDate(t.endDate);
+  t.refs.forEach(r => {
+    const e = toDate(r.expires); if(!e) return;
+    const days = (e - now)/86400000;
+    if(days < 0) A.push({ crit:true, text:(r.label||'A document')+' expired '+fmtDay(r.expires) });
+    else if((tripEnd && e < tripEnd) || days < 30) A.push({ crit:true, text:(r.label||'A document')+' expires '+fmtDay(r.expires) });
+    else if(days < 90) A.push({ crit:false, text:(r.label||'A document')+' expires '+fmtDay(r.expires) });
+  });
+  if(!store.ok()) A.push({ crit:true, text:'Storage is blocked — export a backup now' });
+  return A;
+}
+
+/* ---------- dashboard building blocks ---------- */
+function dashCard(emoji, title, body, right){
+  return '<div class="card"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'
+    + '<div style="font-size:16px">'+emoji+'</div>'
+    + '<div style="font-weight:700;flex:1;font-size:14.5px">'+esc(title)+'</div>'
+    + (right||'') + '</div>' + body + '</div>';
+}
+function seeAllBtn(act, label, data){
+  const attrs = Object.entries(data||{}).map(([k,v])=>'data-'+k+'="'+esc(v)+'"').join(' ');
+  return '<button class="btn sec sm" style="flex:0 0 auto;padding:6px 11px" data-act="'+act+'" '+attrs+'>'+esc(label)+'</button>';
+}
+function moreLink(total, shown, act, data){
+  if(total<=shown) return '';
+  const attrs = Object.entries(data||{}).map(([k,v])=>'data-'+k+'="'+esc(v)+'"').join(' ');
+  return '<button class="btn sec sm" style="width:100%;margin-top:8px" data-act="'+act+'" '+attrs+'>See all '+total+'</button>';
+}
+function miniProgress(p){ const pct = p.total?Math.round(p.done/p.total*100):0; return '<div class="progressline"><i style="width:'+pct+'%"></i></div>'; }
+function entrySub(l, e){
+  const sub = [];
+  if(l.kind==='packing' && e.bagId) sub.push(bagName(e.bagId));
+  if(l.kind==='shopping'){ if(e.where) sub.push(e.where==='there'?'buy there':'at home'); if(e.price!=null) sub.push((e.currency||'')+e.price); }
+  if(e.reason && e.source!=='manual') sub.push(e.reason);
+  return sub;
+}
+function entryRow(l, e){
+  const sub = entrySub(l, e);
+  return '<div class="check '+(e.done?'on':'')+'" data-act="tick-entry" data-list="'+l.id+'" data-entry="'+e.id+'">'
+    + '<span class="box">'+(e.done?'✓':'')+'</span>'
+    + '<span class="tx"><span class="'+(e.done?'strike':'')+'">'+esc(e.text)+(e.qty?' ×'+esc(String(e.qty)):'')+'</span>'
+    + (sub.length?'<br><span class="xtiny muted">'+esc(sub.join(' · '))+'</span>':'') + '</span></div>';
+}
+function itemCheckRow(i){
+  const time = i.start ? (fmtT(i.start)||'') : '';
+  return '<div class="check" data-act="toggle-done" data-id="'+i.id+'">'
+    + '<span class="box">'+(i.done?'✓':'')+'</span>'
+    + '<span class="tx"><span class="'+(i.done?'strike':'')+'">'+(CATS[i.category]?CATS[i.category].e+' ':'')+esc(i.title)+'</span>'
+    + (time?'<br><span class="xtiny muted">'+esc(time)+(i.location?' · '+esc(i.location):'')+'</span>':'') + '</span></div>';
+}
+function relevantRefs(t, now, rf){
+  const order = isUnderway(t,now)
+    ? ['booking','connectivity','emergency','money','medical','identity','other']
+    : ['identity','booking','money','medical','connectivity','emergency','other'];
+  return rf.slice().sort((a,b)=> order.indexOf(a.category||'other') - order.indexOf(b.category||'other'));
+}
+function refMini(r){
+  const shown = !(r.masked && !REVEALED.has(r.id));
+  const val = shown ? (r.value||'') : '•••• tap to reveal';
+  return '<div class="check" style="gap:9px">'
+    + '<span class="tx" style="flex:1"><span class="xtiny muted">'+esc(r.label||'Ref')+'</span><br>'
+    + '<span class="refv" data-act="'+(shown?'copy-ref':'reveal-ref')+'" data-id="'+r.id+'">'+esc(val)+'</span></span>'
+    + '<button class="btn sec sm" style="flex:0 0 auto;padding:6px 10px" data-act="copy-ref" data-id="'+r.id+'">Copy</button></div>';
+}
+
+/* Build every dashboard card, each with a score. vNow sorts and drops zeros,
+   so a card with nothing to say never renders. Scores live in one place. */
+function buildCards(){
+  const t = trip(); if(!t) return [];
+  const now = new Date();
+  const all = t.items.slice().sort(sortItems);
+  const cards = [];
+
+  // 1. Hard deadline — the countdown hero (kept live by tick() via #hero)
+  (function(){
+    const aa = nextAllAboard();
+    let it = aa, kind = aa ? 'aboard' : 'next';
+    if(!it) it = all.find(i => !i.done && i.critical && toDate(i.start) && toDate(i.start) > now);
+    if(!it) it = all.find(i => !i.done && toDate(i.start) && toDate(i.start) > now);
+    if(!it) return;
+    const ms = toDate(it.start) - now, mins = ms/60000;
+    const cls = kind==='aboard' ? (ms<45*60000?'bad':ms<120*60000?'warn':'') : '';
+    const lbl = kind==='aboard' ? 'Back on board' : 'Next up';
+    const html = '<div class="hero '+cls+'" id="hero" data-target="'+esc(it.start)+'" data-kind="'+kind+'">'
+      + '<div class="lbl"><span class="pulse"></span> '+lbl+'</div>'
+      + '<div class="big" id="cd-big"'+(kind!=='aboard'?' style="font-size:32px"':'')+'>'+esc(dur(ms))+'</div>'
+      + '<div class="sub" id="cd-sub">'+(CATS[it.category]?CATS[it.category].e:'')+' '+esc(it.title)+' · '+esc(fmtT(it.start)||'')+' '+esc(fmtDay(it.start))+(it.location?' · '+esc(it.location):'')+'</div></div>';
+    const hard = (kind==='aboard' || it.critical);
+    let score = Math.max(hard?150:1, 1000 - Math.round(mins));  // a real deadline stays visible even when far off
+    if(mins <= 360) score = 5000 - Math.round(mins);            // always first inside 6 h
+    if(!hard) score = Math.min(score, 520);
+    cards.push({ key:'deadline', score, html });
+  })();
+
+  // 2. Needs attention
+  const alerts = computeAlerts(t, now);
+  if(alerts.length){
+    const crit = alerts.filter(a=>a.crit).length;
+    const body = alerts.slice(0,5).map(a=>'<div class="check"><span class="box" style="border-color:'+(a.crit?'var(--bad)':'var(--warn)')+';color:'+(a.crit?'var(--bad)':'var(--warn)')+';background:transparent">!</span><span class="tx">'+esc(a.text)+'</span></div>').join('');
+    cards.push({ key:'attention', score: crit?900:400, html: dashCard('⚠️','Needs attention', body) });
+  }
+
+  // 3. Today
+  const today = all.filter(i => dayKey(i.start)===todayStr() && !i.done);
+  if(today.length){
+    cards.push({ key:'today', score:800, html: dashCard('📅','Today', today.slice(0,5).map(itemCheckRow).join('') + moreLink(today.length,5,'tab',{tab:'timeline'})) });
+  }
+
+  // surfacing, incomplete lists split by kind
+  const active = lists().filter(l => !l.archived && (l.entries||[]).length && !listComplete(l) && listSurfaces(l, now));
+
+  // 4. Next checklist(s)
+  active.filter(l=>l.kind==='checklist').forEach((l,ix)=>{
+    const p = progress(l), overdue = toDate(l.due) && toDate(l.due) < now;
+    const next = (l.entries||[]).filter(e=>!e.done);
+    const body = '<div class="tiny muted" style="margin:-4px 0 8px">'+p.done+'/'+p.total+(l.due?' · due '+fmtDay(l.due)+(fmtT(l.due)?' '+fmtT(l.due):''):'')+(overdue?' · <span style="color:var(--bad)">overdue</span>':'')+'</div>'
+      + miniProgress(p) + '<div style="margin-top:8px">'+next.slice(0,4).map(e=>entryRow(l,e)).join('')+'</div>' + moreLink(next.length,4,'open-list',{id:l.id});
+    cards.push({ key:'chk-'+l.id, score:700 + (overdue?100:0) - ix, html: dashCard(LIST_KINDS.checklist.e, l.title, body, seeAllBtn('open-list','Open',{id:l.id})) });
+  });
+
+  // 5. Packing status
+  active.filter(l=>l.kind==='packing').forEach((l,ix)=>{
+    const p = progress(l), isDaypack = !!l.forActivityId;
+    const next = (l.entries||[]).filter(e=>!e.done);
+    const body = '<div class="tiny muted" style="margin:-4px 0 8px">'+p.done+'/'+p.total+' packed'+(l.due?' · '+(isDaypack?'daypack ':'')+'due '+fmtDay(l.due):'')+'</div>'
+      + miniProgress(p) + '<div style="margin-top:8px">'+next.slice(0,5).map(e=>entryRow(l,e)).join('')+'</div>' + moreLink(next.length,5,'open-list',{id:l.id});
+    cards.push({ key:'pk-'+l.id, score:(isDaypack?850:650) - ix, html: dashCard(LIST_KINDS.packing.e, l.title, body, seeAllBtn('open-list','Open',{id:l.id})) });
+  });
+
+  // 6. Suggestions (pending) — populated in Phase 2
+  const pending = (t.suggestions||[]).filter(s=>s.status==='pending');
+  if(pending.length){
+    cards.push({ key:'sugg', score:600, html: dashCard('💡','Suggestions', pending.slice(0,3).map(sgRow).join('')) });
+  }
+
+  // 7. Coming up
+  const soon = all.filter(i => { const d = toDate(i.start); return d && d > now && dayKey(i.start)!==todayStr() && !i.done; }).slice(0,4);
+  if(soon.length){
+    const body = soon.map(i=>'<div class="check" data-act="open" data-id="'+i.id+'"><span class="box" style="border:0;background:transparent;font-size:15px">'+(CATS[i.category]?CATS[i.category].e:'•')+'</span><span class="tx">'+esc(i.title)+'<br><span class="xtiny muted">'+esc(fmtDay(i.start))+(fmtT(i.start)?' · '+fmtT(i.start):'')+(i.location?' · '+esc(i.location):'')+'</span></span></div>').join('');
+    cards.push({ key:'soon', score:500, html: dashCard('🔭','Coming up', body, seeAllBtn('tab','Timeline',{tab:'timeline'})) });
+  }
+
+  // 8. Shopping / wishlist
+  active.filter(l=>l.kind==='shopping').forEach((l,ix)=>{
+    const un = (l.entries||[]).filter(e=>!e.done);
+    const groups = { home:un.filter(e=>e.where!=='there'), there:un.filter(e=>e.where==='there') };
+    const underway = isUnderway(t, now), order = underway ? ['there','home'] : ['home','there'];
+    let body = '';
+    order.forEach(g=>{ if(groups[g].length) body += '<div class="xtiny muted" style="margin:6px 0 2px;text-transform:uppercase;letter-spacing:.5px">'+(g==='there'?'Buy there':'At home')+'</div>'+groups[g].slice(0,4).map(e=>entryRow(l,e)).join(''); });
+    body += moreLink(un.length, 8, 'open-list',{id:l.id});
+    cards.push({ key:'shop-'+l.id, score:300 + ((underway&&groups.there.length)?200:0) - ix, html: dashCard(LIST_KINDS.shopping.e, l.title, body, seeAllBtn('open-list','Open',{id:l.id})) });
+  });
+
+  // 9. Quick refs
+  const rf = refs();
+  if(rf.length){
+    cards.push({ key:'refs', score:250, html: dashCard('🔑','Quick refs', relevantRefs(t, now, rf).slice(0,4).map(refMini).join(''), seeAllBtn('tab','Vault',{tab:'refs'})) });
+  }
+
+  // 10. Trip summary — always, if a trip exists
+  (function(){
+    const n = t.items.length, li = lists().filter(l=>!l.archived).length, rr = refs().length;
+    const body = '<div class="tiny muted" style="margin:-4px 0 10px">'+esc([t.destination, t.startDate?fmtDay(t.startDate)+(t.endDate?' – '+fmtDay(t.endDate):''):''].filter(Boolean).join(' · ')||'No dates set')+'</div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap"><span class="badge">'+n+' item'+(n===1?'':'s')+'</span><span class="badge">'+li+' list'+(li===1?'':'s')+'</span><span class="badge">'+rr+' ref'+(rr===1?'':'s')+'</span></div>'
+      + '<div class="btnrow"><button class="btn sec sm" style="flex:1" data-act="tab" data-tab="lists">🗂 Lists</button><button class="btn sec sm" style="flex:1" data-act="tab" data-tab="refs">🔑 Vault</button><button class="btn sec sm" style="flex:1" data-act="tab" data-tab="add">＋ Add</button></div>';
+    cards.push({ key:'summary', score:100, html: dashCard('🧭', t.name||'This trip', body) });
+  })();
+
+  return cards;
+}
+
+function sgRow(s){
+  return '<div class="card flat" style="padding:10px 12px;margin-bottom:8px"><div style="font-weight:650;font-size:13.5px">'+esc(s.title)+'</div>'
+    + (s.reason?'<div class="xtiny muted" style="margin-top:2px">'+esc(s.reason)+'</div>':'')
+    + '<div class="btnrow" style="margin-top:8px"><button class="btn sm" style="flex:1" data-act="accept-sugg" data-id="'+s.id+'">Accept</button>'
+    + '<button class="btn sec sm" style="flex:1" data-act="dismiss-sugg" data-id="'+s.id+'">No thanks</button></div></div>';
+}
+
+/* ---------- LISTS ---------- */
+function vLists(){
+  const t = trip(); if(!t) return welcome();
+  const ls = lists().filter(l=>!l.archived);
+  let h = '<div class="sec-h"><h3>Lists</h3><div class="ln"></div></div><button class="btn" data-act="new-list">＋ New list</button><div style="height:14px"></div>';
+  if(!ls.length) return h + '<div class="empty"><span class="em">🗂️</span><h4>No lists yet</h4><p class="tiny">Make a checklist, a packing list, or a shopping list — they surface on the dashboard when they matter.</p></div>';
+  ['checklist','packing','shopping'].forEach(kind=>{
+    const g = ls.filter(l=>l.kind===kind); if(!g.length) return;
+    h += '<div class="sec-h"><h3>'+LIST_KINDS[kind].e+' '+esc(LIST_KINDS[kind].l)+'</h3><div class="ln"></div></div>';
+    h += g.map(l=>{ const p=progress(l), pct=p.total?Math.round(p.done/p.total*100):0;
+      return '<div class="lrow" data-act="open-list" data-id="'+l.id+'"><div class="ic">'+LIST_KINDS[l.kind].e+'</div>'
+        + '<div class="bd"><div style="font-weight:650;font-size:14.5px">'+esc(l.title)+'</div>'
+        + '<div class="xtiny muted" style="margin-top:2px">'+p.done+'/'+p.total+(l.due?' · due '+fmtDay(l.due):'')+'</div>'
+        + '<div class="progressline" style="margin-top:7px"><i style="width:'+pct+'%"></i></div></div></div>'; }).join('');
+  });
+  const arch = lists().filter(l=>l.archived);
+  if(arch.length) h += '<p class="xtiny muted center" style="margin-top:12px">'+arch.length+' archived</p>';
+  return h;
+}
+function vList(){
+  const l = findList(CURRENT_LIST); if(!l) return vLists();
+  const p = progress(l);
+  let h = '<button class="btn sec sm" style="width:auto;margin-bottom:12px" data-act="tab" data-tab="lists">‹ Lists</button>'
+    + '<div class="card"><div style="display:flex;gap:8px;align-items:flex-start"><div style="font-size:20px">'+LIST_KINDS[l.kind].e+'</div>'
+    + '<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:16px">'+esc(l.title)+'</div>'
+    + '<div class="xtiny muted" style="margin-top:2px">'+LIST_KINDS[l.kind].l+(l.due?' · due '+fmtDay(l.due)+(fmtT(l.due)?' '+fmtT(l.due):''):'')+' · '+p.done+'/'+p.total+'</div></div></div>'
+    + '<div class="progressline" style="margin-top:10px"><i style="width:'+(p.total?Math.round(p.done/p.total*100):0)+'%"></i></div></div>'
+    + '<div style="display:flex;gap:8px;margin-bottom:12px"><input class="in" id="ent_new" placeholder="Add an item…" style="flex:1"><button class="btn" style="width:auto;flex:0 0 auto" data-act="add-entry" data-id="'+l.id+'">Add</button></div>';
+  const entries = l.entries||[];
+  if(!entries.length) h += '<div class="empty" style="padding:26px"><span class="em">📝</span><p class="tiny">Nothing on this list yet.</p></div>';
+  else {
+    const un = entries.filter(e=>!e.done), dn = entries.filter(e=>e.done);
+    h += '<div class="card">'+(un.map(e=>entryDetailRow(l,e)).join('')||'<p class="tiny muted center" style="padding:10px">All done 🎉</p>')+'</div>';
+    if(dn.length) h += '<div class="sec-h"><h3>Done '+dn.length+'</h3><div class="ln"></div></div><div class="card">'+dn.map(e=>entryDetailRow(l,e)).join('')+'</div>';
+  }
+  h += '<div class="btnrow"><button class="btn sec sm" style="flex:1" data-act="edit-list" data-id="'+l.id+'">Edit list</button>'
+    + '<button class="btn sec sm" style="flex:1" data-act="archive-list" data-id="'+l.id+'">Archive</button>'
+    + '<button class="btn dgr sm" data-act="del-list" data-id="'+l.id+'">Delete</button></div><div style="height:24px"></div>';
+  return h;
+}
+function entryDetailRow(l, e){
+  const sub = entrySub(l, e);
+  return '<div style="display:flex;align-items:center;gap:4px;border-bottom:1px solid var(--line)">'
+    + '<div class="check '+(e.done?'on':'')+'" style="flex:1" data-act="tick-entry" data-list="'+l.id+'" data-entry="'+e.id+'">'
+    + '<span class="box">'+(e.done?'✓':'')+'</span><span class="tx"><span class="'+(e.done?'strike':'')+'">'+esc(e.text)+(e.qty?' ×'+esc(String(e.qty)):'')+'</span>'
+    + (sub.length?'<br><span class="xtiny muted">'+esc(sub.join(' · '))+'</span>':'')+'</span></div>'
+    + '<button class="btn sec sm" style="flex:0 0 auto;padding:8px 10px;background:transparent;border:0" data-act="edit-entry" data-list="'+l.id+'" data-entry="'+e.id+'">⋯</button></div>';
+}
+
+/* ---------- REFS VAULT ---------- */
+function vRefs(){
+  const t = trip(); if(!t) return welcome();
+  const rf = refs();
+  let h = '<div class="dotwarn">🔒 Stored in plain text on this device — fine for a passport or booking number, but never store card PINs or passwords here.</div>'
+    + '<div style="display:flex;gap:8px;margin-bottom:12px"><input class="in" id="ref_q" placeholder="Search the vault…" value="'+esc(REFQ)+'" style="flex:1"><button class="btn" style="width:auto;flex:0 0 auto" data-act="new-ref">＋ Add</button></div>';
+  if(!rf.length) return h + '<div class="empty"><span class="em">🔑</span><h4>Vault is empty</h4><p class="tiny">Keep passport numbers, booking references, insurance policy numbers and emergency contacts here — searchable, and available with no signal.</p></div>';
+  let list = rf.slice();
+  if(REFQ){ const q = REFQ.toLowerCase(); list = list.filter(r=>[r.label,r.value,r.note].filter(Boolean).join(' ').toLowerCase().includes(q)); }
+  if(!list.length) return h + '<div class="empty" style="padding:26px"><p class="tiny muted">Nothing matches “'+esc(REFQ)+'”.</p></div>';
+  Object.keys(REF_CATS).forEach(cat=>{
+    const g = list.filter(r=>(r.category||'other')===cat); if(!g.length) return;
+    h += '<div class="sec-h"><h3>'+REF_CATS[cat][1]+' '+esc(REF_CATS[cat][0])+'</h3><div class="ln"></div></div>' + g.map(refRow).join('');
+  });
+  return h;
+}
+function refRow(r){
+  const shown = !(r.masked && !REVEALED.has(r.id));
+  const e = toDate(r.expires), expSoon = e ? (e-new Date())/86400000 < 90 : false;
+  return '<div class="card" style="padding:12px"><div style="display:flex;gap:8px;align-items:flex-start"><div style="flex:1;min-width:0">'
+    + '<div class="xtiny muted" style="text-transform:uppercase;letter-spacing:.5px">'+esc(r.label||'')+'</div>'
+    + '<div class="refv" style="font-weight:650;font-size:15px;margin-top:2px" data-act="'+(shown?'copy-ref':'reveal-ref')+'" data-id="'+r.id+'">'+(shown?esc(r.value||''):'•••• tap to reveal')+'</div>'
+    + (r.note?'<div class="xtiny muted" style="margin-top:4px">'+esc(r.note)+'</div>':'')
+    + (r.expires?'<div class="xtiny" style="margin-top:4px;color:'+(expSoon?'var(--bad)':'var(--tx2)')+'">Expires '+esc(fmtDay(r.expires))+'</div>':'')
+    + '</div><div style="display:flex;flex-direction:column;gap:6px"><button class="btn sec sm" style="padding:6px 10px" data-act="copy-ref" data-id="'+r.id+'">Copy</button>'
+    + '<button class="btn sec sm" style="padding:6px 10px" data-act="edit-ref" data-id="'+r.id+'">Edit</button></div></div></div>';
+}
+
+/* ---------- sheets for lists / entries / refs ---------- */
+function listSheet(l){
+  const e = l||{}, kind = e.kind||'checklist';
+  sheet(l?'Edit list':'New list',
+    '<label class="fl">Type</label><select class="in" id="l_kind"'+(l?' disabled':'')+'>'+Object.keys(LIST_KINDS).map(k=>'<option value="'+k+'"'+(kind===k?' selected':'')+'>'+LIST_KINDS[k].e+' '+LIST_KINDS[k].l+'</option>').join('')+'</select>'
+    + '<label class="fl">Title</label><input class="in" id="l_title" placeholder="e.g. Before we leave" value="'+esc(e.title||'')+'">'
+    + '<label class="fl">Due (optional)</label><input class="in" id="l_due" type="datetime-local" value="'+esc(e.due||'')+'">'
+    + '<label class="fl">Start reminding — hours before due (optional)</label><input class="in" id="l_lead" type="number" min="0" placeholder="auto" value="'+(e.leadMinutes!=null?(e.leadMinutes/60):'')+'">'
+    + '<p class="xtiny muted" style="margin-top:5px">Blank uses sensible defaults: checklist 1 day, packing 3 days, shopping the whole trip.</p>'
+    + '<div class="btnrow"><button class="btn" data-primary data-act="save-list" data-id="'+esc(e.id||'')+'">'+(l?'Save':'Create list')+'</button></div><div style="height:10px"></div>');
+}
+function entrySheet(l, e){
+  const isNew = !e; e = e||{};
+  const bags = bagsOf();
+  sheet(isNew?'Add item':'Edit item',
+    '<label class="fl">Item</label><input class="in" id="e_text" value="'+esc(e.text||'')+'" placeholder="What is it?">'
+    + '<div class="row2"><div><label class="fl">Quantity</label><input class="in" id="e_qty" type="number" min="1" value="'+esc(e.qty!=null?String(e.qty):'')+'"></div>'
+    + (l.kind==='packing'?'<div><label class="fl">Bag</label><select class="in" id="e_bag"><option value="">Unassigned</option>'+bags.map(b=>'<option value="'+b.id+'"'+(e.bagId===b.id?' selected':'')+'>'+esc(b.name)+'</option>').join('')+'</select></div>':'')
+    + (l.kind==='shopping'?'<div><label class="fl">Where</label><select class="in" id="e_where"><option value="home"'+(e.where!=='there'?' selected':'')+'>At home</option><option value="there"'+(e.where==='there'?' selected':'')+'>Buy there</option></select></div>':'')
+    + '</div>'
+    + (l.kind==='shopping'?'<div class="row2"><div><label class="fl">Price</label><input class="in" id="e_price" type="number" step="0.01" value="'+esc(e.price!=null?String(e.price):'')+'"></div><div><label class="fl">Currency</label><input class="in" id="e_cur" value="'+esc(e.currency||'')+'" placeholder="€"></div></div>':'')
+    + '<label class="fl">Note</label><input class="in" id="e_note" value="'+esc(e.note||'')+'" placeholder="Optional">'
+    + '<div class="btnrow"><button class="btn" data-primary data-act="save-entry" data-list="'+l.id+'" data-entry="'+esc(e.id||'')+'">'+(isNew?'Add':'Save')+'</button>'
+    + (isNew?'':'<button class="btn dgr sm" data-act="del-entry" data-list="'+l.id+'" data-entry="'+e.id+'">Delete</button>')+'</div><div style="height:10px"></div>');
+}
+function refSheet(r){
+  const e = r||{};
+  sheet(r?'Edit ref':'Add to vault',
+    '<div class="dotwarn">Never store card PINs or account passwords here. Passport and policy numbers are fine.</div>'
+    + '<label class="fl">Label</label><input class="in" id="r_label" placeholder="e.g. Passport no." value="'+esc(e.label||'')+'">'
+    + '<label class="fl">Value</label><input class="in" id="r_value" placeholder="e.g. 1234567" value="'+esc(e.value||'')+'">'
+    + '<label class="fl">Category</label><select class="in" id="r_cat">'+Object.keys(REF_CATS).map(k=>'<option value="'+k+'"'+((e.category||'other')===k?' selected':'')+'>'+REF_CATS[k][1]+' '+REF_CATS[k][0]+'</option>').join('')+'</select>'
+    + '<div class="row2"><div><label class="fl">Expires (optional)</label><input class="in" id="r_exp" type="date" value="'+esc(e.expires||'')+'"></div>'
+    + '<div><label class="fl">Privacy</label><div style="height:44px;display:flex;align-items:center"><label class="tiny" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="r_mask"'+(e.masked?' checked':'')+'> Mask until tapped</label></div></div></div>'
+    + '<label class="fl">Note</label><input class="in" id="r_note" value="'+esc(e.note||'')+'" placeholder="Optional">'
+    + '<div class="btnrow"><button class="btn" data-primary data-act="save-ref" data-id="'+esc(e.id||'')+'">'+(r?'Save':'Add')+'</button>'
+    + (r?'<button class="btn dgr sm" data-act="del-ref" data-id="'+e.id+'">Delete</button>':'')+'</div><div style="height:10px"></div>');
+}
+function fallbackCopy(text){
+  try { const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.focus(); ta.select(); document.execCommand('copy'); ta.remove(); toast('Copied'); }
+  catch(e){ toast('Copy not supported — long-press to copy', true); }
+}
+
+/* ============================================================
    actions
    ============================================================ */
 function dupKey(x){ return [x.category, String(x.title||'').trim().toLowerCase().replace(/\s+/g,' '), x.start||''].join('|'); }
@@ -988,6 +1340,7 @@ function addItems(list){
     });
     n++;
   });
+  if(t && !t.departureAt) t.departureAt = deriveDeparture(t);
   save(); return n;
 }
 
@@ -1241,9 +1594,12 @@ document.addEventListener('click', async (ev) => {
       const t = S.trips.find(x => x.id === id);
       Object.assign(t, { name, destination:g('t_dest'), startDate:g('t_s'), endDate:g('t_e'), ship:g('t_ship'), notes:g('t_notes') });
     } else {
-      const t = { id:uid(), name, destination:g('t_dest'), startDate:g('t_s'), endDate:g('t_e'), ship:g('t_ship'), notes:g('t_notes'), items:[], createdAt:Date.now() };
+      const t = { id:uid(), name, destination:g('t_dest'), startDate:g('t_s'), endDate:g('t_e'), ship:g('t_ship'), notes:g('t_notes'),
+                  items:[], people:[], bags:[], lists:[], refs:[], suggestions:[], departureAt:'', createdAt:Date.now() };
+      seedTripDefaults(t);
       S.trips.push(t); S.activeTrip = t.id;
       if(PARSED_TRIP_ITEMS.length){ addItems(PARSED_TRIP_ITEMS); PARSED_TRIP_ITEMS = []; }
+      t.departureAt = deriveDeparture(t);
     }
     save(); closeSheet(); TAB = 'now'; render(); toast('Trip saved'); return;
   }
@@ -1255,6 +1611,88 @@ document.addEventListener('click', async (ev) => {
       location:r.location||'', details:[r.why,r.bestTime&&('Best time: '+r.bestTime),r.cost&&('Cost: '+r.cost),r.duration&&('Takes: '+r.duration),r.tip&&('Tip: '+r.tip)].filter(Boolean).join('\n'),
       source:'ai' }]);
     toast('Added to your trip'); return;
+  }
+
+  // ---- lists ----
+  if(a === 'new-list'){ listSheet(null); return; }
+  if(a === 'open-list'){ CURRENT_LIST = id; TAB = 'list'; render(); window.scrollTo(0,0); return; }
+  if(a === 'edit-list'){ listSheet(findList(id)); return; }
+  if(a === 'save-list'){
+    const t = trip(); if(!t) return;
+    const g = i => { const e = $('#'+i); return e ? e.value.trim() : ''; };
+    const title = g('l_title') || 'Untitled list';
+    const leadEl = $('#l_lead');
+    const leadMin = (leadEl && leadEl.value !== '') ? Math.max(0, +leadEl.value) * 60 : null;
+    if(id){ const l = findList(id); if(l){ l.title = title; l.due = g('l_due'); l.leadMinutes = leadMin; } }
+    else {
+      const kindEl = $('#l_kind');
+      const l = { id:uid(), kind:(kindEl?kindEl.value:'checklist'), title, due:g('l_due'), leadMinutes:leadMin,
+                  forActivityId:'', archived:false, createdAt:Date.now(), entries:[] };
+      t.lists.push(l); CURRENT_LIST = l.id;
+    }
+    save(); closeSheet(); TAB = id ? TAB : 'list'; render(); toast(id?'List updated':'List created'); return;
+  }
+  if(a === 'del-list'){
+    const t = trip(); if(!t) return;
+    if(!confirm('Delete this list and its items?')) return;
+    t.lists = t.lists.filter(l => l.id !== id); CURRENT_LIST = null;
+    save(); TAB = 'lists'; render(); toast('List deleted'); return;
+  }
+  if(a === 'archive-list'){ const l = findList(id); if(l){ l.archived = !l.archived; save(); TAB = 'lists'; render(); toast(l.archived?'Archived':'Restored'); } return; }
+
+  // ---- entries ----
+  if(a === 'tick-entry'){
+    const l = findList(el.dataset.list); if(!l) return;
+    const e = (l.entries||[]).find(x => x.id === el.dataset.entry);
+    if(e){ e.done = !e.done; save(); render(); } return;
+  }
+  if(a === 'add-entry'){
+    const l = findList(id); if(!l) return;
+    const inp = $('#ent_new'); const text = inp ? inp.value.trim() : '';
+    if(!text){ toast('Type an item first', true); return; }
+    l.entries.push({ id:uid(), text:text.slice(0,140), done:false, qty:null, bagId:'', personId:'',
+      where: l.kind==='shopping' ? 'home' : '', price:null, currency:'', requiredFor:[], source:'manual', reason:'', note:'' });
+    save(); render(); const n = $('#ent_new'); if(n) n.focus(); return;
+  }
+  if(a === 'edit-entry'){ const l = findList(el.dataset.list); if(!l) return; entrySheet(l, (l.entries||[]).find(x => x.id === el.dataset.entry)); return; }
+  if(a === 'save-entry'){
+    const l = findList(el.dataset.list); if(!l) return;
+    const g = i => { const x = $('#'+i); return x ? x.value.trim() : ''; };
+    const data = { text:g('e_text').slice(0,140), qty:g('e_qty')?+g('e_qty'):null, note:g('e_note') };
+    if(l.kind==='packing') data.bagId = ($('#e_bag')||{}).value || '';
+    if(l.kind==='shopping'){ data.where = ($('#e_where')||{}).value || 'home'; data.price = g('e_price')?+g('e_price'):null; data.currency = g('e_cur'); }
+    if(!data.text){ toast('Give it a name', true); return; }
+    const eid = el.dataset.entry;
+    if(eid){ const e = (l.entries||[]).find(x => x.id === eid); if(e) Object.assign(e, data); }
+    else l.entries.push(Object.assign({ id:uid(), done:false, qty:null, bagId:'', personId:'',
+      where: l.kind==='shopping' ? 'home' : '', price:null, currency:'', requiredFor:[], source:'manual', reason:'', note:'' }, data));
+    save(); closeSheet(); render(); return;
+  }
+  if(a === 'del-entry'){ const l = findList(el.dataset.list); if(!l) return; l.entries = (l.entries||[]).filter(x => x.id !== el.dataset.entry); save(); closeSheet(); render(); return; }
+
+  // ---- refs vault ----
+  if(a === 'new-ref'){ refSheet(null); return; }
+  if(a === 'edit-ref'){ refSheet(refs().find(r => r.id === id)); return; }
+  if(a === 'save-ref'){
+    const t = trip(); if(!t) return;
+    const g = i => { const x = $('#'+i); return x ? x.value.trim() : ''; };
+    const data = { label:g('r_label'), value:g('r_value'), category:($('#r_cat')||{}).value || 'other',
+      expires:g('r_exp'), masked: !!($('#r_mask') && $('#r_mask').checked), note:g('r_note') };
+    if(!data.value){ toast('Add a value', true); return; }
+    if(id){ const r = refs().find(x => x.id === id); if(r) Object.assign(r, data); }
+    else t.refs.push(Object.assign({ id:uid(), relatedItemId:'' }, data));
+    save(); closeSheet(); render(); toast('Saved to vault'); return;
+  }
+  if(a === 'del-ref'){ const t = trip(); if(!t) return; t.refs = t.refs.filter(r => r.id !== id); save(); closeSheet(); render(); toast('Removed'); return; }
+  if(a === 'reveal-ref'){ REVEALED.add(id); render(); return; }
+  if(a === 'copy-ref'){
+    const r = refs().find(x => x.id === id); if(!r) return;
+    try {
+      if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(r.value||'').then(()=>toast('Copied'), ()=>fallbackCopy(r.value||''));
+      else fallbackCopy(r.value||'');
+    } catch(e){ fallbackCopy(r.value||''); }
+    if(r.masked){ REVEALED.add(id); render(); }
+    return;
   }
 
   if(a === 'theme'){ S.theme = el.dataset.v; save(); applyTheme(); render(); return; }
@@ -1280,7 +1718,7 @@ document.addEventListener('click', async (ev) => {
   }
   if(a === 'wipe'){
     if(!confirm('Delete all trips, items and settings from this device?')) return;
-    store.del(KEY); S = { v:1, apiKey:'', model:'claude-opus-5', endpoint:'', theme:'auto', activeTrip:null, trips:[], notified:[], recs:{} };
+    store.del(KEY); S = { v:2, apiKey:'', model:'claude-opus-5', endpoint:'', theme:'auto', activeTrip:null, trips:[], notified:[], recs:{}, neverSuggest:[] };
     save(); TAB = 'now'; render(); toast('All data deleted'); return;
   }
 });
@@ -1303,13 +1741,14 @@ document.addEventListener('change', async (ev) => {
       const txt = await f.text(); const p = JSON.parse(txt);
       if(!p || !Array.isArray(p.trips)) throw new Error('That file is not a Travel Agent backup');
       if(!confirm('Replace everything on this device with the backup?')) return;
-      S = Object.assign({ v:1, apiKey:'', model:'claude-opus-5', endpoint:'', theme:'auto', activeTrip:null, trips:[], notified:[], recs:{} }, p);
+      S = Object.assign({ v:2, apiKey:'', model:'claude-opus-5', endpoint:'', theme:'auto', activeTrip:null, trips:[], notified:[], recs:{}, neverSuggest:[] }, p);
       load(); save(); applyTheme(); TAB = 'now'; render(); toast('Backup restored');
     } catch(e){ toast(e.message, true, 5000); }
   }
 });
 document.addEventListener('input', (ev) => {
   if(ev.target.id === 'q'){ SEARCH = ev.target.value; const p = ev.target.selectionStart; render(); const n = $('#q'); if(n){ n.focus(); try{ n.setSelectionRange(p,p); }catch(e){} } }
+  if(ev.target.id === 'ref_q'){ REFQ = ev.target.value; const p = ev.target.selectionStart; render(); const n = $('#ref_q'); if(n){ n.focus(); try{ n.setSelectionRange(p,p); }catch(e){} } }
 });
 
 /* ---- boot ---- */
