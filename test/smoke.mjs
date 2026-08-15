@@ -55,6 +55,9 @@ const STUB_TRIP = `{"trip":{"name":"Adriatic cruise","destination":"Venice, Spli
 "items":[{"category":"flight","title":"SK1234 OSL → VCE","start":"2099-08-17T07:20","end":"2099-08-17T09:55","location":"Oslo Gardermoen","address":"","confirmation":"Ref QW7T2P, seat 14A","details":"Terminal 2","allAboard":false,"critical":true,"remindMinutes":180}]}`;
 /* deliberately missing its closing brace — proves repairJSON() still recovers the payload */
 const STUB_RECS = `{"items":[{"title":"Srđ cable car","category":"activity","why":"Best view over the old town and quick enough for a port day.","location":"10 min walk from Ploče gate","duration":"1h15","bestTime":"before 10:30","cost":"~€27","tip":"Leaves 2h before all aboard. Verify it is running.","start":null,"fitsDeadline":true}]`;
+/* REQUIREMENTS: shell (essential, daypack), headlamp (daypack), boots (essential, daypack) */
+const STUB_REQS = `{"pack":[{"text":"Waterproof shell jacket","qty":1,"essential":true,"daypack":true},{"text":"Headlamp","qty":1,"essential":false,"daypack":true},{"text":"Hiking boots","qty":1,"essential":true,"daypack":true}],"hazards":["Weather changes fast above 1000 m"],"notes":"Tell someone your route."}`;
+const STUB_LISTSUGGEST = `{"items":[{"text":"Blister plasters","reason":"You have a 6-hour hike on day 4","essential":false}]}`;
 
 const TINY_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8EAgALgAD/aNpbtEAAAAASUVORK5CYII=',
@@ -86,7 +89,9 @@ pg.on('console', m => { if (m.type() === 'error' && !/ERR_INTERNET_DISCONNECTED/
 
 await ctx.route('**/v1/messages', async route => {
   const sys = (JSON.parse(route.request().postData() || '{}').system) || '';
-  const text = sys.includes('local guide') ? STUB_RECS
+  const text = sys.includes('requirements engine') ? STUB_REQS
+             : sys.includes('help a traveller pack') ? STUB_LISTSUGGEST
+             : sys.includes('local guide') ? STUB_RECS
              : sys.includes('ADDITIONAL TASK') ? STUB_TRIP
              : STUB_EXTRACT;
   await route.fulfill({ status: 200, contentType: 'application/json',
@@ -237,6 +242,69 @@ try {
   await pg.waitForTimeout(200);
   check('a ref saves and shows in the vault',
     await pg.evaluate(() => /123456789/.test(document.querySelector('#view').textContent)));
+
+  /* --- v2 Phase 2: requirements → diff → suggestions → daypack --- */
+  // a packing list that already holds the boots
+  await pg.evaluate(() => {
+    const t = S.trips.find(x => x.id === S.activeTrip);
+    const bag = t.bags[0].id;
+    t.lists.push({ id:'pkmain', kind:'packing', title:'Main bag', due:'', leadMinutes:null, forActivityId:'', archived:false, createdAt:Date.now(),
+      entries:[{ id:'boots1', text:'Hiking boots', done:false, qty:null, bagId:bag, personId:'', where:'', price:null, currency:'', requiredFor:[], source:'manual', reason:'', note:'' }] });
+    save();
+  });
+  // add a mountain hike activity → fires the REQUIREMENTS stub
+  await tap('nav [data-tab="add"]');
+  await tap('[data-act="addmode"][data-m="manual"]');
+  await pg.fill('#m_title', 'Mountain hike, 6 hours, 1400 m');
+  await pg.selectOption('#m_cat', 'activity');
+  await pg.fill('#m_start', '2099-08-21T08:00');
+  await tap('[data-act="save-manual"]');
+  await pg.waitForTimeout(900);
+
+  const sug = await pg.evaluate(() => { const t = S.trips.find(x => x.id === S.activeTrip); return pendingSuggestions(t).map(s => normText(s.payload.text || s.title)); });
+  check('proposes the missing gear', sug.includes('waterproof shell jacket') && sug.includes('headlamp'), sug.join(', '));
+  check('proposes nothing already on the packing list', !sug.includes('hiking boots'));
+  const pre = await pg.evaluate(() => { const t = S.trips.find(x => x.id === S.activeTrip); return pendingSuggestions(t).every(s => s.kind === 'pack-add'); });
+  check('before departure, suggestions say add-to-packing', pre);
+
+  const dp = await pg.evaluate(() => {
+    const t = S.trips.find(x => x.id === S.activeTrip); const l = t.lists.find(x => x.forActivityId);
+    return l ? { due: l.due, refsBoots: l.entries.some(e => /boots/i.test(e.text) && /in /i.test(e.text)) } : null;
+  });
+  check('creates a daypack list due the morning of the activity', dp && /T07:00$/.test(dp.due), dp && dp.due);
+  check('the daypack references packed items by bag', dp && dp.refsBoots);
+
+  // dismiss the shell suggestion, reload, add a second similar activity
+  await tap('nav [data-tab="now"]');
+  await pg.waitForTimeout(200);
+  await pg.locator('[data-act="dismiss-sugg"][data-id="sg-waterproof-shell-jacket"]').first().click();
+  await pg.waitForTimeout(250);
+  check('a dismissal is written to the global neverSuggest',
+    await pg.evaluate(() => S.neverSuggest.includes('waterproof shell jacket')));
+  await pg.reload({ waitUntil: 'load' });
+  await pg.waitForTimeout(500);
+  await tap('nav [data-tab="add"]');
+  await tap('[data-act="addmode"][data-m="manual"]');
+  await pg.fill('#m_title', 'Ridge walk, 4 hours');
+  await pg.selectOption('#m_cat', 'activity');
+  await pg.fill('#m_start', '2099-08-22T08:00');
+  await tap('[data-act="save-manual"]');
+  await pg.waitForTimeout(900);
+  check('a dismissed item is never proposed again, even on another activity',
+    await pg.evaluate(() => { const t = S.trips.find(x => x.id === S.activeTrip); return !pendingSuggestions(t).map(s => normText(s.payload.text || s.title)).includes('waterproof shell jacket'); }));
+
+  // flip to post-departure → advice flips, essential gap raises an at-risk alert
+  const post = await pg.evaluate(() => {
+    const t = S.trips.find(x => x.id === S.activeTrip);
+    const d = new Date(Date.now() - 86400000); const p = n => String(n).padStart(2,'0');
+    t.departureAt = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T08:00`; save();
+    const list = pendingSuggestions(t), alerts = computeAlerts(t, new Date());
+    return { kinds: list.map(s => s.kind), atRisk: alerts.some(a => a.crit && /at risk/i.test(a.text)) };
+  });
+  check('after departure, the same gaps become buy/rent/borrow',
+    post.kinds.length > 0 && post.kinds.every(k => k === 'buy-there'), post.kinds.join(','));
+  check('an essential gap after departure raises an at-risk alert', post.atRisk);
+  await shot('05-phase2');
 
   /* --- calendar export --- */
   await tap('nav [data-tab="timeline"]');

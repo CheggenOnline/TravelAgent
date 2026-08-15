@@ -17,13 +17,16 @@ signal.
 > `portside.v1`, see rule #6) so existing installs keep their data. Do not "finish the
 > rename" on those — see the non-negotiables.
 
-> **v2 (in progress).** The app is being extended per `PORTSIDEV2SPEC.md`: a computed,
-> ranked **dashboard** (replaces the old Now tab), hand-built **lists** (checklist / packing
-> / shopping) reachable from the trip-summary card, and a searchable **refs vault**. Storage
-> moved to `portside.v2` with a non-destructive migration. Phase 1 (this) adds all of that
-> with **no new AI calls**; Phases 2–3 add the requirement engine, suggestions and program
-> pick-list capture. Each `item`/`trip` gained optional fields with safe defaults, so v1 data
-> keeps working.
+> **v2 (in progress).** The app is being extended per `PORTSIDEV2SPEC.md`. **Phases 1–2 are
+> shipped:** a computed, ranked **dashboard**; hand-built **lists** (checklist / packing /
+> shopping); a searchable **refs vault**; and the intelligence layer — a **REQUIREMENTS** call
+> fired once when an activity is added (result stored on the item), a purely-local
+> **requirement diff** against the packing list, the **departure boundary** (before → "add to
+> packing"; after → "buy/rent/borrow there" + an at-risk alert for essential gaps),
+> **daypack** lists that reference what is actually packed, and **suggestions** with
+> accept/dismiss where dismissals are sticky and global (`S.neverSuggest`). LIST_SUGGEST runs
+> on demand ("check my list"). Storage is `portside.v2` (non-destructive migration from v1).
+> **Phase 3 remaining:** program pick-list capture, airline-rule checks, base-list learning.
 
 ---
 
