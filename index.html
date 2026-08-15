@@ -1025,6 +1025,10 @@ function computeAlerts(t, now){
     else if(days < 90) A.push({ crit:false, text:(r.label||'A document')+' expires '+fmtDay(r.expires) });
   });
   if(!store.ok()) A.push({ crit:true, text:'Storage is blocked — export a backup now' });
+  // essential gear still missing after departure = the activity is at risk (safety, not a suggestion)
+  if(!preDeparture(t, now)){
+    computeGaps(t).filter(g => g.essential).forEach(g => A.push({ crit:true, text:'“'+g.activityTitle+'” at risk — no '+g.text+' (essential). Buy, rent or borrow it there.' }));
+  }
   return A;
 }
 
@@ -1086,6 +1090,7 @@ function refMini(r){
 function buildCards(){
   const t = trip(); if(!t) return [];
   const now = new Date();
+  reconcileDaypacks(t);
   const all = t.items.slice().sort(sortItems);
   const cards = [];
 
@@ -1145,10 +1150,11 @@ function buildCards(){
     cards.push({ key:'pk-'+l.id, score:(isDaypack?850:650) - ix, html: dashCard(LIST_KINDS.packing.e, l.title, body, seeAllBtn('open-list','Open',{id:l.id})) });
   });
 
-  // 6. Suggestions (pending) — populated in Phase 2
-  const pending = (t.suggestions||[]).filter(s=>s.status==='pending');
+  // 6. Suggestions (pending) — deterministic gaps + AI list-suggestions, capped at 3 shown
+  const pending = pendingSuggestions(t);
   if(pending.length){
-    cards.push({ key:'sugg', score:600, html: dashCard('💡','Suggestions', pending.slice(0,3).map(sgRow).join('')) });
+    const body = pending.slice(0,3).map(sgRow).join('') + (pending.length>3 ? '<p class="xtiny muted center" style="margin-top:4px">+'+(pending.length-3)+' more when you open a packing list</p>' : '');
+    cards.push({ key:'sugg', score:600, html: dashCard('💡','Suggestions', body) });
   }
 
   // 7. Coming up
@@ -1188,9 +1194,10 @@ function buildCards(){
 }
 
 function sgRow(s){
-  return '<div class="card flat" style="padding:10px 12px;margin-bottom:8px"><div style="font-weight:650;font-size:13.5px">'+esc(s.title)+'</div>'
+  return '<div class="card flat" style="padding:10px 12px;margin-bottom:8px;border-left:3px solid '+(s.essential?'var(--bad)':'var(--acc)')+'">'
+    + '<div style="font-weight:650;font-size:13.5px">'+esc(s.title)+(s.essential?' <span class="badge b" style="margin-left:4px">essential</span>':'')+'</div>'
     + (s.reason?'<div class="xtiny muted" style="margin-top:2px">'+esc(s.reason)+'</div>':'')
-    + '<div class="btnrow" style="margin-top:8px"><button class="btn sm" style="flex:1" data-act="accept-sugg" data-id="'+s.id+'">Accept</button>'
+    + '<div class="btnrow" style="margin-top:8px"><button class="btn sm" style="flex:1" data-act="accept-sugg" data-id="'+s.id+'">'+(s.kind==='buy-there'?'Add to shopping':'Add to packing')+'</button>'
     + '<button class="btn sec sm" style="flex:1" data-act="dismiss-sugg" data-id="'+s.id+'">No thanks</button></div></div>';
 }
 
@@ -1229,6 +1236,8 @@ function vList(){
     h += '<div class="card">'+(un.map(e=>entryDetailRow(l,e)).join('')||'<p class="tiny muted center" style="padding:10px">All done 🎉</p>')+'</div>';
     if(dn.length) h += '<div class="sec-h"><h3>Done '+dn.length+'</h3><div class="ln"></div></div><div class="card">'+dn.map(e=>entryDetailRow(l,e)).join('')+'</div>';
   }
+  if(l.kind==='packing' && !l.forActivityId && hasKey())
+    h += '<button class="btn sec" style="width:100%;margin-top:4px" data-act="check-list" data-id="'+l.id+'">✨ Check my list against the plan</button>';
   h += '<div class="btnrow"><button class="btn sec sm" style="flex:1" data-act="edit-list" data-id="'+l.id+'">Edit list</button>'
     + '<button class="btn sec sm" style="flex:1" data-act="archive-list" data-id="'+l.id+'">Archive</button>'
     + '<button class="btn dgr sm" data-act="del-list" data-id="'+l.id+'">Delete</button></div><div style="height:24px"></div>';
@@ -1315,6 +1324,223 @@ function fallbackCopy(text){
 }
 
 /* ============================================================
+   v2 Phase 2 — requirements, the diff, suggestions, daypacks
+   Principle 3: Claude once at capture; everything below is local,
+   deterministic, offline, and free to re-run.
+   ============================================================ */
+function preDeparture(t, now){ const d = toDate(t.departureAt); return d ? now < d : true; }
+
+/* tiny local synonym map so "shell" ≈ "rain jacket" ≈ "waterproof" */
+const SYN = [
+  ['shell','rain jacket','waterproof','rain shell','raincoat','hardshell'],
+  ['headlamp','head torch','headlight','head lamp'],
+  ['boots','hiking boots','walking boots','hiking boots'],
+  ['water bottle','flask','hydration','water'],
+  ['sunscreen','sun cream','sunblock','spf'],
+  ['power bank','battery pack','portable charger','powerbank'],
+  ['trainers','sneakers','running shoes'],
+  ['sunglasses','shades'],
+  ['first aid','first-aid','plasters','blister plasters','band aid','bandaid'],
+  ['swimsuit','swimming costume','swimwear','trunks','bathing suit'],
+  ['adapter','adaptor','travel adapter','plug adapter']
+];
+function normText(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim(); }
+function synGroup(s){ const n = normText(s); for(const g of SYN){ if(g.some(w => n.includes(w))) return g; } return null; }
+function matches(a, b){
+  const na = normText(a), nb = normText(b); if(!na || !nb) return false;
+  if(na === nb || na.includes(nb) || nb.includes(na)) return true;
+  const g = synGroup(a); if(g && g.some(w => nb.includes(w))) return true;
+  const h = synGroup(b); if(h && h.some(w => na.includes(w))) return true;
+  return false;
+}
+function packEntriesOf(t){
+  const out = [];
+  (t.lists||[]).filter(l => l.kind==='packing' && !l.forActivityId && !l.archived).forEach(l => (l.entries||[]).forEach(e => out.push(e)));
+  return out;
+}
+/* The requirement diff — plain code, never an API call. */
+function computeGaps(t){
+  const gaps = [], packed = packEntriesOf(t);
+  (t.items||[]).filter(i => i.category==='activity' && i.requirements && Array.isArray(i.requirements.pack)).forEach(i => {
+    i.requirements.pack.forEach(req => {
+      if(!req || !req.text) return;
+      if(packed.some(e => matches(req.text, e.text))) return;   // already covered
+      gaps.push({ activityId:i.id, activityTitle:i.title, activityStart:i.start, text:req.text, qty:req.qty, essential:!!req.essential, daypack:!!req.daypack });
+    });
+  });
+  return gaps;
+}
+/* Suggestions are a pure function of gaps + AI list-suggestions + neverSuggest +
+   the departure boundary. Recomputed every render, so accepting/packing an item
+   clears it and a dismissal (sticky, global) never returns. Ids are deterministic. */
+function pendingSuggestions(t){
+  const now = new Date(), pre = preDeparture(t, now), out = [], seen = new Set();
+  computeGaps(t).forEach(g => {
+    const key = normText(g.text);
+    if(!key || seen.has(key) || S.neverSuggest.indexOf(key) >= 0) return;
+    seen.add(key);
+    out.push({
+      id:'sg-'+key.replace(/ /g,'-'), kind: pre ? 'pack-add' : 'buy-there', essential:g.essential, source:'diff',
+      title: (pre ? 'Pack ' : 'Get there — ') + g.text,
+      reason: g.activityTitle + (g.activityStart ? ', '+fmtDay(g.activityStart) : '') + (pre ? '' : ' · buy, rent or borrow at destination'),
+      payload:{ text:g.text, qty:g.qty, essential:g.essential, daypack:g.daypack, activityId:g.activityId }
+    });
+  });
+  (t.suggestions||[]).filter(s => s.status==='pending').forEach(s => {
+    const key = normText((s.payload && s.payload.text) || s.title);
+    if(!key || seen.has(key) || S.neverSuggest.indexOf(key) >= 0) return;
+    if(packEntriesOf(t).some(e => matches(key, e.text))) return;   // already packed
+    seen.add(key);
+    out.push(Object.assign({ essential:false, source:'ai' }, s));
+  });
+  out.sort((a,b) => (b.essential?1:0) - (a.essential?1:0));
+  return out.slice(0, 8);   // cap pending at 8
+}
+function ensureList(t, kind, title){
+  let l = (t.lists||[]).find(x => x.kind===kind && !x.forActivityId && !x.archived);
+  if(!l){ l = { id:uid(), kind, title, due:'', leadMinutes:null, forActivityId:'', archived:false, createdAt:Date.now(), entries:[] }; t.lists.push(l); }
+  return l;
+}
+function applySuggestion(t, s){
+  const p = s.payload || {};
+  const text = (p.text || s.title).slice(0,140);
+  if(s.kind === 'buy-there'){
+    const sl = ensureList(t, 'shopping', 'Shopping');
+    sl.entries.push({ id:uid(), text, done:false, qty:p.qty||null, bagId:'', personId:'', where:'there', price:null, currency:'', requiredFor:p.activityId?[p.activityId]:[], source:'derived', reason:s.reason||'', note:'' });
+  } else {
+    const pl = ensureList(t, 'packing', 'Packing');
+    pl.entries.push({ id:uid(), text, done:false, qty:p.qty||null, bagId:'', personId:'', where:'', price:null, currency:'', requiredFor:p.activityId?[p.activityId]:[], source:'derived', reason:s.reason||'', note:'' });
+  }
+}
+
+/* ---- REQUIREMENTS: the one API call, fired on adding an activity ---- */
+const REQUIREMENTS_SYS = `You are the requirements engine inside a travel organiser. Given ONE planned activity and the trip context, list only what THIS activity specifically needs the traveller to bring or wear — not a generic packing list.
+
+Return ONLY JSON:
+{"pack":[{"text":"Waterproof shell jacket","qty":1,"essential":true,"daypack":true}],
+ "hazards":["Weather changes fast above 1000 m"],
+ "notes":"No mobile coverage on the ridge — tell someone your route."}
+
+Rules:
+- "essential":true only when the activity is unsafe or impossible without it.
+- "daypack":true when it must be carried on the day itself (goes in the day bag), not merely owned.
+- Concrete, checkable items only (max ~10). Skip obvious basics like "clothes" or "phone".
+- hazards: short, specific, actionable. notes: one or two practical lines. Both may be empty.`;
+
+function findItemAny(id){ for(const t of S.trips){ const it = (t.items||[]).find(x => x.id === id); if(it) return { t, it }; } return null; }
+let REQ_QUEUE = [], REQ_RUNNING = false;
+function enqueueRequirements(ids){
+  if(!hasKey()) return;
+  (ids||[]).forEach(id => { if(REQ_QUEUE.indexOf(id) < 0) REQ_QUEUE.push(id); });
+  runReqQueue();
+}
+async function runReqQueue(){
+  if(REQ_RUNNING) return; REQ_RUNNING = true;
+  while(REQ_QUEUE.length){
+    const id = REQ_QUEUE.shift();
+    const found = findItemAny(id); if(!found) continue;
+    const { t, it } = found; if(it.requirements) continue;
+    try {
+      const raw = await claude('Trip: '+JSON.stringify(tripContext())+'\n\nActivity to prepare for:\n'+JSON.stringify({ title:it.title, start:it.start, end:it.end, location:it.location, details:it.details }),
+        { system: REQUIREMENTS_SYS, prefill:'{"pack":', max_tokens:1500 });
+      const out = parseLoose(raw);
+      it.requirements = { generatedAt: Date.now(),
+        pack: Array.isArray(out.pack) ? out.pack : [],
+        hazards: Array.isArray(out.hazards) ? out.hazards : [],
+        notes: out.notes || '' };
+      generateDaypack(t, it);
+      save(); render();
+    } catch(e){ /* leave requirements null — offline / no-key friendly, ret=able via the item */ }
+  }
+  REQ_RUNNING = false;
+}
+
+/* ---- daypack: a carry-on-the-day list that references what is actually packed ---- */
+function daypackAnnot(t, text){
+  const owned = packEntriesOf(t).find(e => matches(text, e.text));
+  if(!owned) return { text: text + ' — ⚠️ not packed', packed:false };
+  const bn = bagName(owned.bagId);
+  return { text: text + (bn ? ' — in '+bn : ' — packed'), packed:true };
+}
+function generateDaypack(t, it){
+  const day = ((it.requirements && it.requirements.pack) || []).filter(p => p.daypack);
+  if(!day.length) return;
+  let l = (t.lists||[]).find(x => x.forActivityId === it.id);
+  const due = it.start ? (dayKey(it.start)+'T07:00') : '';
+  if(!l){ l = { id:uid(), kind:'packing', title:'Daypack — '+it.title, due, leadMinutes:840, forActivityId:it.id, archived:false, createdAt:Date.now(), entries:[] }; t.lists.push(l); }
+  else l.due = due;
+  day.forEach(p => {
+    const a = daypackAnnot(t, p.text);
+    let e = (l.entries||[]).find(x => matches(p.text, x.text));
+    if(e){ e.text = a.text; e.reason = it.title; }
+    else l.entries.push({ id:uid(), text:a.text, done:false, qty:p.qty||null, bagId:'', personId:'', where:'', price:null, currency:'', requiredFor:[it.id], source:'derived', reason:it.title, note:'' });
+  });
+}
+/* Cheap annotation refresh so "in <bag>" / "not packed" stays current as the
+   main packing list changes. Creation happened once (saved); this only re-labels. */
+function reconcileDaypacks(t){
+  (t.items||[]).filter(i => i.category==='activity' && i.requirements).forEach(i => {
+    const l = (t.lists||[]).find(x => x.forActivityId === i.id); if(!l) return;
+    ((i.requirements.pack)||[]).filter(p => p.daypack).forEach(p => {
+      const e = (l.entries||[]).find(x => matches(p.text, x.text)); if(!e) return;
+      e.text = daypackAnnot(t, p.text).text;
+    });
+  });
+}
+
+/* ---- LIST_SUGGEST: on-demand "check my list" ---- */
+const LIST_SUGGEST_SYS = `You help a traveller pack. Given a packing list, the trip, and the planned activities (with any known requirements), suggest what is MISSING or worth adding — only things NOT already on the list.
+
+Return ONLY JSON: {"items":[{"text":"Blister plasters","reason":"You have a 6-hour hike on day 4","essential":false}]}
+
+Rules:
+- Never repeat something already on the list.
+- "reason" is mandatory and specific to THIS trip and its activities.
+- Max 8 items. Favour activity-, weather- and destination-driven gaps over generic advice.`;
+async function doCheckList(btn, listId){
+  const t = trip(); if(!t) return;
+  const l = findList(listId); if(!l) return;
+  const orig = btn.innerHTML; btn.innerHTML = '<span class="spin"></span> Checking…'; btn.disabled = true;
+  try {
+    const acts = t.items.filter(i => i.category==='activity').map(i => ({ title:i.title, start:i.start, requirements:i.requirements }));
+    const payload = { trip:tripContext(), list:{ kind:l.kind, entries:(l.entries||[]).map(e => e.text) }, activities:acts };
+    const raw = await claude('Suggest additions to this list.\n\n'+JSON.stringify(payload,null,1), { system: LIST_SUGGEST_SYS, prefill:'{"items":', max_tokens:1500 });
+    const out = parseLoose(raw);
+    let added = 0;
+    (out.items||[]).forEach(s => {
+      if(!s || !s.text) return;
+      const key = normText(s.text);
+      if(!key || S.neverSuggest.indexOf(key) >= 0) return;
+      if((l.entries||[]).some(e => matches(s.text, e.text))) return;
+      if((t.suggestions||[]).some(x => x.status==='pending' && normText((x.payload&&x.payload.text)||x.title) === key)) return;
+      t.suggestions.push({ id:'sg-ai-'+key.replace(/ /g,'-'), kind:'pack-add', title:'Pack '+s.text, reason:s.reason||'', payload:{ text:s.text, essential:!!s.essential }, essential:!!s.essential, source:'ai', status:'pending', createdAt:Date.now() });
+      added++;
+    });
+    save(); render(); toast(added ? added+' suggestion'+(added===1?'':'s')+' added' : 'Nothing new to suggest');
+  } catch(e){ toast(e.message, true, 6000); }
+  btn.innerHTML = orig; btn.disabled = false;
+}
+
+/* requirements shown inside an activity's detail sheet */
+function requirementsBlock(it){
+  const r = it.requirements;
+  let h = '<div class="sec-h"><h3>What this needs</h3><div class="ln"></div></div>';
+  if(r && ((r.pack&&r.pack.length) || (r.hazards&&r.hazards.length) || r.notes)){
+    if(r.pack && r.pack.length) h += '<div class="card flat" style="padding:8px 12px">'+r.pack.map(p =>
+      '<div class="check" style="padding:6px 2px"><span class="box" style="border:0;background:transparent">'+(p.essential?'❗':(p.daypack?'🎒':'•'))+'</span>'
+      + '<span class="tx">'+esc(p.text)+(p.qty&&p.qty>1?' ×'+p.qty:'')+(p.essential?' <span class="xtiny" style="color:var(--bad)">essential</span>':'')+(p.daypack?' <span class="xtiny muted">daypack</span>':'')+'</span></div>').join('')+'</div>';
+    if(r.hazards && r.hazards.length) h += '<div class="warnbox"><b>⚠︎ Heads up</b><div style="margin-top:5px">'+r.hazards.map(esc).join('<br>')+'</div></div>';
+    if(r.notes) h += '<p class="tiny muted">'+esc(r.notes)+'</p>';
+    h += '<button class="btn sec sm" style="width:100%;margin-top:6px" data-act="plan-item" data-id="'+it.id+'"'+(hasKey()?'':' disabled')+'>↻ Re-check what to pack</button>';
+  } else if(hasKey()){
+    h += '<button class="btn sec" data-act="plan-item" data-id="'+it.id+'">✨ Plan what to pack &amp; the risks</button>';
+  } else {
+    h += '<p class="tiny muted">Add a Claude API key in Settings to auto-plan gear and hazards for this activity.</p>';
+  }
+  return h;
+}
+
+/* ============================================================
    actions
    ============================================================ */
 function dupKey(x){ return [x.category, String(x.title||'').trim().toLowerCase().replace(/\s+/g,' '), x.start||''].join('|'); }
@@ -1365,6 +1591,7 @@ function openItem(id){
     </div>
     ${it.photo?`<img class="photo-full" src="${it.photo}" alt="attachment">`:''}
     ${it.location?`<a class="btn sec" style="margin-top:12px" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(it.address||it.location)}">🗺 Open in Maps</a>`:''}
+    ${it.category==='activity' ? requirementsBlock(it) : ''}
     <div class="btnrow">
       <button class="btn sec sm" style="flex:1" data-act="toggle-done" data-id="${it.id}">${it.done?'↩ Not done':'✓ Done'}</button>
       <button class="btn sec sm" style="flex:1" data-act="ics-one" data-id="${it.id}">📅 Calendar</button>
@@ -1558,10 +1785,13 @@ document.addEventListener('click', async (ev) => {
     if(!v.title.trim()){ toast('Give it a title', true); return; }
     if(id === undefined && el.dataset.edit){
       const it = items().find(x => x.id === el.dataset.edit);
-      if(it){ Object.assign(it, v); save(); closeSheet(); toast('Updated'); TAB='timeline'; render(); return; }
+      if(it){ Object.assign(it, v); if(it.category === 'activity'){ it.requirements = null; enqueueRequirements([it.id]); } save(); closeSheet(); toast('Updated'); TAB='timeline'; render(); return; }
     }
     v.source = v.photo ? 'photo' : 'manual';
-    addItems([v]); PENDING = []; closeSheet(); toast('Saved'); TAB = 'timeline'; render(); return;
+    const tb = trip(); const before = tb ? new Set(tb.items.map(x => x.id)) : new Set();
+    addItems([v]); PENDING = [];
+    if(v.category === 'activity'){ const ta = trip(); enqueueRequirements(ta ? ta.items.filter(x => !before.has(x.id)).map(x => x.id) : []); }
+    closeSheet(); toast('Saved'); TAB = 'timeline'; render(); return;
   }
   if(a === 'edit-item'){
     const it = items().find(x => x.id === id); if(!it) return;
@@ -1694,6 +1924,30 @@ document.addEventListener('click', async (ev) => {
     if(r.masked){ REVEALED.add(id); render(); }
     return;
   }
+
+  // ---- suggestions & requirements ----
+  if(a === 'accept-sugg'){
+    const t = trip(); if(!t) return;
+    const s = pendingSuggestions(t).find(x => x.id === id); if(!s) return;
+    applySuggestion(t, s);
+    (t.suggestions||[]).forEach(x => { if(x.id === id) x.status = 'accepted'; });
+    save(); render(); toast(s.kind==='buy-there' ? 'Added to shopping' : 'Added to packing'); return;
+  }
+  if(a === 'dismiss-sugg'){
+    const t = trip(); if(!t) return;
+    const s = pendingSuggestions(t).find(x => x.id === id); if(!s) return;
+    const key = normText((s.payload && s.payload.text) || s.title);
+    if(key && S.neverSuggest.indexOf(key) < 0) S.neverSuggest.push(key);   // sticky, global
+    (t.suggestions||[]).forEach(x => { if(x.id === id) x.status = 'dismissed'; });
+    save(); render(); return;
+  }
+  if(a === 'plan-item'){
+    const found = findItemAny(id); if(!found) return;
+    found.it.requirements = null; closeSheet();
+    if(hasKey()){ enqueueRequirements([id]); toast('Planning what to pack…'); } else toast('Add a Claude API key first', true);
+    return;
+  }
+  if(a === 'check-list'){ await doCheckList(el, id); return; }
 
   if(a === 'theme'){ S.theme = el.dataset.v; save(); applyTheme(); render(); return; }
   if(a === 'save-settings'){
